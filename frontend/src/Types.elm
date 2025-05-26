@@ -72,6 +72,22 @@ type TreasurySpendRedeemer
     | Disburse Value
 
 
+treasurySpendRedeemerToData : TreasurySpendRedeemer -> Data
+treasurySpendRedeemerToData redeemer =
+    case redeemer of
+        Reorganize ->
+            Data.Constr N.zero []
+
+        SweepTreasury ->
+            Data.Constr N.one []
+
+        Fund amount ->
+            Data.Constr N.two [ Cardano.Value.toData amount ]
+
+        Disburse amount ->
+            Data.Constr N.three [ Cardano.Value.toData amount ]
+
+
 
 -- Vendor
 
