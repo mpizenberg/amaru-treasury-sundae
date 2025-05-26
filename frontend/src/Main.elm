@@ -10,6 +10,7 @@ import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
 import Json.Decode as JDecode exposing (Value)
+import Types
 
 
 main =
