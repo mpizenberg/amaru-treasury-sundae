@@ -4,15 +4,25 @@ import Bytes.Comparable exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId, StakeAddress)
 import Cardano.Data as Data
 import Cardano.MultiAsset as MultiAsset
-import Cardano.Script exposing (PlutusVersion(..), ScriptCbor)
+import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxIntent)
+import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
 import Natural exposing (Natural)
-import Types exposing (TreasurySpendRedeemer(..), treasurySpendRedeemerToData)
+import Types exposing (TreasuryConfiguration, TreasurySpendRedeemer(..), treasuryConfigToData, treasurySpendRedeemerToData)
 
 
+{-| Apply config parameters to the unapplied script to get the final Plutus script.
+-}
+initializeScript : TreasuryConfiguration -> Script.PlutusScript -> Result String Script.PlutusScript
+initializeScript config unappliedScript =
+    Uplc.applyParamsToScript [ treasuryConfigToData config ] unappliedScript
+
+
+{-| Withraw Ada from the treasury reward account.
+-}
 initialWithdrawal : NetworkId -> Bytes CredentialHash -> Bytes ScriptCbor -> Natural -> List TxIntent
 initialWithdrawal networkId treasuryScriptHash treasuryScriptBytes amount =
     let
