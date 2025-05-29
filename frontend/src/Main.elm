@@ -7,8 +7,8 @@ import Cardano.Cip30 as Cip30
 import Cardano.Gov exposing (CostModels)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.Uplc as Uplc
-import Cardano.Utxo as Utxo exposing (Output)
-import Dict
+import Cardano.Utxo as Utxo exposing (Output, OutputReference)
+import Dict exposing (Dict)
 import Dict.Any
 import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
@@ -54,6 +54,7 @@ type alias Model =
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
     , scripts : Scripts
+    , treasuryManagement : TreasuryManagement
     , error : Maybe String
     }
 
@@ -65,6 +66,7 @@ initialModel scripts =
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
     , scripts = scripts
+    , treasuryManagement = TreasuryUnspecified
     , error = Nothing
     }
 
@@ -89,36 +91,25 @@ type alias Scripts =
     }
 
 
-type alias TreasuryCreationData =
-    { treasuryId : String
-    , scopes : List ScopeConfig
-    }
+type TreasuryManagement
+    = TreasuryUnspecified
+    | TreasuryFullyLoaded LoadedTreasury
 
 
-type alias ScopeConfig =
-    { name : String
-    , expirationTime : Int -- Posix time
-    , owner : String
-    }
-
-
-defaultScopeConfig : ScopeConfig
-defaultScopeConfig =
-    { name = ""
-    , expirationTime = 0
-    , owner = ""
-    }
-
-
-type alias Treasury =
-    { id : String
-    , scopes : List Scope
+type alias LoadedTreasury =
+    { rootUtxo : ( OutputReference, Output )
+    , scopes : Dict String Scope
     }
 
 
 type alias Scope =
     { name : String
-    , config : ScopeConfig
+    , ownerScript : PlutusScript
+    , sundaeTreasuryScript : PlutusScript
+    , registryUtxo : ( OutputReference, Output )
+
+    -- TODO: make sure they are updated after every Tx
+    , utxos : Utxo.RefDict Output
     }
 
 
