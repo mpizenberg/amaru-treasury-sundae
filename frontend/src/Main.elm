@@ -6,18 +6,21 @@ import Cardano.Address as Address exposing (CredentialHash)
 import Cardano.Cip30 as Cip30
 import Cardano.Gov exposing (CostModels)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
+import Cardano.TxIntent exposing (TxIntent)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
+import Cardano.Value as Value exposing (Value)
 import Dict exposing (Dict)
 import Dict.Any
 import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
-import Json.Decode as JD exposing (Value)
+import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
 import Result.Extra
+import Treasury exposing (SpendConfig)
 import Types
 
 
@@ -33,14 +36,14 @@ main =
         }
 
 
-port toWallet : Value -> Cmd msg
+port toWallet : JD.Value -> Cmd msg
 
 
-port fromWallet : (Value -> msg) -> Sub msg
+port fromWallet : (JD.Value -> msg) -> Sub msg
 
 
 type Msg
-    = WalletMsg Value
+    = WalletMsg JD.Value
     | ConnectButtonClicked { id : String }
 
 
@@ -113,7 +116,7 @@ type alias Scope =
     }
 
 
-init : { blueprints : List Value } -> ( Model, Cmd Msg )
+init : { blueprints : List JD.Value } -> ( Model, Cmd Msg )
 init { blueprints } =
     let
         decodedBlueprints : List ScriptBlueprint
@@ -214,6 +217,37 @@ handleWalletMsg value model =
 
         _ ->
             ( model, Cmd.none )
+
+
+
+-- Disburse
+
+
+disburse : Scope -> OutputReference -> (Value -> List TxIntent) -> Value -> Result String (List TxIntent)
+disburse scope utxoRef receivers value =
+    case Dict.Any.get utxoRef scope.utxos of
+        Nothing ->
+            Err <| "The selected UTxO isn’t in the known list of UTxOs for this scope: " ++ Debug.toString utxoRef
+
+        Just spentOutput ->
+            let
+                spendConfig : SpendConfig
+                spendConfig =
+                    { treasuryScriptBytes = Script.cborWrappedBytes scope.sundaeTreasuryScript
+                    , requiredSigners = Debug.todo ""
+                    , requiredWithdrawals = Debug.todo ""
+                    , spentInputRef = utxoRef
+                    , spentOutput = spentOutput
+                    }
+
+                overflowValue =
+                    Value.subtract value spentOutput.amount
+            in
+            if overflowValue == Value.zero then
+                Ok <| Treasury.disburse spendConfig receivers value
+
+            else
+                Err <| "Trying to disburse more than is available in this UTxO. Overflow value is: " ++ Debug.toString overflowValue
 
 
 

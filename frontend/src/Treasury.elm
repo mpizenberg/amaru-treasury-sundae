@@ -52,14 +52,27 @@ initialWithdrawal networkId treasuryScriptHash treasuryScriptBytes amount =
 type alias SpendConfig =
     { treasuryScriptBytes : Bytes ScriptCbor
     , requiredSigners : List (Bytes CredentialHash)
+    , requiredWithdrawals : List WithdrawalIntent
     , spentInputRef : OutputReference
     , spentOutput : Output
     }
 
 
+type alias WithdrawalIntent =
+    { stakeCredential : StakeAddress
+    , amount : Natural
+    , scriptWitness : Maybe Witness.Script
+    }
+
+
 {-| Sweep funds back to the Cardano Treasury.
 
-The caller is responsible to list the requiredSigners.
+The caller is responsible to list the requiredSigners
+and to provide required additional withdrawals.
+
+WARNING: There cannot be 2 withdrawals for the same credential,
+so if spending multiple utxos, make sure you only add the withdrawals once.
+
 If the contract has expired, there is no required signer.
 If not, the caller decides which of the signers are required
 to satisfy the sweep multisig in the treasury configuration.
@@ -87,7 +100,11 @@ sweepBackToCardanoTreasury ({ spentOutput } as config) =
 
 {-| Disburse funds to some destination.
 
-The caller is responsible to list the requiredSigners.
+The caller is responsible to list the requiredSigners
+and to provide required additional withdrawals.
+
+WARNING: There cannot be 2 withdrawals for the same credential,
+so if spending multiple utxos, make sure you only add the withdrawals once.
 
 -}
 disburse : SpendConfig -> (Value -> List TxIntent) -> Value -> List TxIntent
@@ -104,10 +121,11 @@ The caller is responsible to list the requiredSigners.
 reorganize :
     Bytes ScriptCbor
     -> List (Bytes CredentialHash)
+    -> List WithdrawalIntent
     -> List { spentInputRef : OutputReference, spentOutput : Output }
     -> (Value -> List TxIntent)
     -> List TxIntent
-reorganize treasuryScriptBytes requiredSigners spentUtxos receivers =
+reorganize treasuryScriptBytes requiredSigners requiredWithdrawals spentUtxos receivers =
     let
         spendings : List TxIntent
         spendings =
@@ -115,7 +133,7 @@ reorganize treasuryScriptBytes requiredSigners spentUtxos receivers =
             spentUtxos
                 |> List.concatMap
                     (\{ spentInputRef, spentOutput } ->
-                        spend (SpendConfig treasuryScriptBytes requiredSigners spentInputRef spentOutput)
+                        spend (SpendConfig treasuryScriptBytes requiredSigners requiredWithdrawals spentInputRef spentOutput)
                             SweepTreasury
                             (\_ -> [])
                             spentOutput.amount
@@ -133,7 +151,7 @@ reorganize treasuryScriptBytes requiredSigners spentUtxos receivers =
 and return the unspent amount into it.
 -}
 spend : SpendConfig -> TreasurySpendRedeemer -> (Value -> List TxIntent) -> Value -> List TxIntent
-spend { treasuryScriptBytes, requiredSigners, spentInputRef, spentOutput } redeemer receivers value =
+spend { treasuryScriptBytes, requiredSigners, requiredWithdrawals, spentInputRef, spentOutput } redeemer receivers value =
     let
         plutusScriptWitness : Witness.PlutusScript
         plutusScriptWitness =
@@ -156,9 +174,12 @@ spend { treasuryScriptBytes, requiredSigners, spentInputRef, spentOutput } redee
                     , datumWitness = Nothing
                     , plutusScriptWitness = plutusScriptWitness
                     }
+
+        additionalWithdrawals =
+            List.map TxIntent.WithdrawRewards requiredWithdrawals
     in
     if leftOver == Value.zero then
-        spendIntent :: receivers value
+        spendIntent :: receivers value ++ additionalWithdrawals
 
     else
-        spendIntent :: recreatedOutput :: receivers value
+        spendIntent :: recreatedOutput :: receivers value ++ additionalWithdrawals
