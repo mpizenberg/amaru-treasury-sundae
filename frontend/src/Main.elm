@@ -3,12 +3,16 @@ port module Main exposing (..)
 import Browser
 import Cardano.Address as Address
 import Cardano.Cip30 as Cip30
-import Cardano.Utxo exposing (Output, OutputReference)
+import Cardano.Gov exposing (CostModels)
+import Cardano.Uplc as Uplc
+import Cardano.Utxo as Utxo exposing (Output)
 import Dict
+import Dict.Any
 import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
-import Json.Decode as JDecode exposing (Value)
+import Json.Decode as JD exposing (Value)
+import Natural as N exposing (Natural)
 import Types
 
 
@@ -39,19 +43,39 @@ type Msg
 -- MODEL
 
 
-type Model
-    = Startup
-    | WalletDiscovered (List Cip30.WalletDescriptor)
-    | WalletLoading Cip30.Wallet
-    | WalletLoaded
-        { wallet : Cip30.Wallet
-        , utxos : List ( OutputReference, Output )
-        }
+type alias Model =
+    { protocolParams : ProtocolParams
+    , discoveredWallets : List Cip30.WalletDescriptor
+    , connectedWallet : Maybe Cip30.Wallet
+    , localStateUtxos : Utxo.RefDict Output
+    }
+
+
+initialModel : Model
+initialModel =
+    { protocolParams = defaultProtocolParams
+    , discoveredWallets = []
+    , connectedWallet = Nothing
+    , localStateUtxos = Utxo.emptyRefDict
+    }
+
+
+type alias ProtocolParams =
+    { costModels : CostModels
+    , registrationDeposit : Natural
+    }
+
+
+defaultProtocolParams : ProtocolParams
+defaultProtocolParams =
+    { costModels = Uplc.conwayDefaultCostModels
+    , registrationDeposit = N.fromSafeInt <| 5 * 1000 * 1000 -- ₳5
+    }
 
 
 init : () -> ( Model, Cmd Msg )
 init _ =
-    ( Startup
+    ( initialModel
     , toWallet <| Cip30.encodeRequest Cip30.discoverWallets
     )
 
@@ -60,38 +84,40 @@ init _ =
 -- UPDATE
 
 
-walletResponseDecoder : JDecode.Decoder (Cip30.Response Cip30.ApiResponse)
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        WalletMsg value ->
+            handleWalletMsg value model
+
+        ConnectButtonClicked { id } ->
+            ( model, toWallet (Cip30.encodeRequest (Cip30.enableWallet { id = id, extensions = [], watchInterval = Just 3 })) )
+
+
+walletResponseDecoder : JD.Decoder (Cip30.Response Cip30.ApiResponse)
 walletResponseDecoder =
     Cip30.responseDecoder <|
         Dict.singleton 30 Cip30.apiDecoder
 
 
-update : Msg -> Model -> ( Model, Cmd Msg )
-update msg model =
-    case ( msg, model ) of
-        ( WalletMsg value, _ ) ->
-            case ( JDecode.decodeValue walletResponseDecoder value, model ) of
-                -- We just discovered available wallets
-                ( Ok (Cip30.AvailableWallets wallets), Startup ) ->
-                    ( WalletDiscovered wallets, Cmd.none )
+handleWalletMsg : JD.Value -> Model -> ( Model, Cmd Msg )
+handleWalletMsg value model =
+    case JD.decodeValue walletResponseDecoder value of
+        -- We just discovered available wallets
+        Ok (Cip30.AvailableWallets wallets) ->
+            ( { model | discoveredWallets = wallets }, Cmd.none )
 
-                -- We just connected to the wallet, let’s ask for the available utxos
-                ( Ok (Cip30.EnabledWallet wallet), WalletDiscovered _ ) ->
-                    ( WalletLoading wallet
-                    , toWallet <| Cip30.encodeRequest <| Cip30.getUtxos wallet { amount = Nothing, paginate = Nothing }
-                    )
+        -- We just connected to the wallet, let’s ask for the available utxos
+        Ok (Cip30.EnabledWallet wallet) ->
+            ( { model | connectedWallet = Just wallet }
+            , toWallet <| Cip30.encodeRequest <| Cip30.getUtxos wallet { amount = Nothing, paginate = Nothing }
+            )
 
-                -- We just received the utxos
-                ( Ok (Cip30.ApiResponse _ (Cip30.WalletUtxos utxos)), WalletLoading wallet ) ->
-                    ( WalletLoaded { wallet = wallet, utxos = utxos }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    ( model, Cmd.none )
-
-        ( ConnectButtonClicked { id }, WalletDiscovered _ ) ->
-            ( model, toWallet (Cip30.encodeRequest (Cip30.enableWallet { id = id, extensions = [], watchInterval = Nothing })) )
+        -- We just received the utxos, let’s add them to the local state
+        Ok (Cip30.ApiResponse _ (Cip30.WalletUtxos utxos)) ->
+            ( { model | localStateUtxos = List.foldl (\( ref, output ) -> Dict.Any.insert ref output) model.localStateUtxos utxos }
+            , Cmd.none
+            )
 
         _ ->
             ( model, Cmd.none )
@@ -103,26 +129,22 @@ update msg model =
 
 view : Model -> Html Msg
 view model =
-    case model of
-        Startup ->
-            div [] [ div [] [ text "Hello Cardano!" ] ]
+    div []
+        [ viewWalletSection model
+        ]
 
-        WalletDiscovered availableWallets ->
+
+viewWalletSection : Model -> Html Msg
+viewWalletSection { discoveredWallets, connectedWallet } =
+    case connectedWallet of
+        Nothing ->
             div []
-                [ div [] [ text "Hello Cardano!" ]
-                , div [] [ text "CIP-30 wallets detected:" ]
-                , viewAvailableWallets availableWallets
+                [ div [] [ text "CIP-30 wallets detected:" ]
+                , viewAvailableWallets discoveredWallets
                 ]
 
-        WalletLoading _ ->
-            div [] [ text "Loading wallet assets ..." ]
-
-        WalletLoaded { wallet, utxos } ->
-            div []
-                [ div [] [ text <| "Wallet: " ++ (Cip30.walletDescriptor wallet).name ]
-                , div [] [ text <| "Address: " ++ (Address.toBech32 <| Cip30.walletChangeAddress wallet) ]
-                , div [] [ text <| "UTxO count: " ++ String.fromInt (List.length utxos) ]
-                ]
+        Just wallet ->
+            viewConnectedWallet wallet
 
 
 viewAvailableWallets : List Cip30.WalletDescriptor -> Html Msg
@@ -143,3 +165,11 @@ viewAvailableWallets wallets =
             div [] [ walletIcon w, text (walletDescription w), connectButton w ]
     in
     div [] (List.map walletRow wallets)
+
+
+viewConnectedWallet : Cip30.Wallet -> Html Msg
+viewConnectedWallet wallet =
+    div []
+        [ div [] [ text <| "Wallet: " ++ (Cip30.walletDescriptor wallet).name ]
+        , div [] [ text <| "Address: " ++ (Address.toBech32 <| Cip30.walletChangeAddress wallet) ]
+        ]
