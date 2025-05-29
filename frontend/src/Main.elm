@@ -45,7 +45,7 @@ type Msg
     | AddScope
     | UpdateScopeName Int String
     | UpdateScopeExpiration Int String
-    | EditPermissionScript Int PermissionType String
+    | UpdateScopeOwner Int String
     | RemoveScope Int
     | CreateTreasury
     | BackToTreasurySelection
@@ -101,38 +101,17 @@ type alias TreasuryCreationData =
 
 type alias ScopeConfig =
     { name : String
-    , expirationTime : Maybe Int -- Posix time
-    , permissions : ScopePermissions
+    , expirationTime : Int -- Posix time
+    , owner : String
     }
 
 
 defaultScopeConfig : ScopeConfig
 defaultScopeConfig =
     { name = ""
-    , expirationTime = Nothing
-    , permissions = defaultScopePermissions
+    , expirationTime = 0
+    , owner = ""
     }
-
-
-type alias ScopePermissions =
-    { disburse : MultisigScript
-    , reorganize : MultisigScript
-    , sweep : MultisigScript
-    }
-
-
-defaultScopePermissions : ScopePermissions
-defaultScopePermissions =
-    { disburse = MultisigScript.AnyOf []
-    , reorganize = MultisigScript.AnyOf []
-    , sweep = MultisigScript.AnyOf []
-    }
-
-
-type PermissionType
-    = DisbursePermission
-    | ReorganizePermission
-    | SweepPermission
 
 
 type alias Treasury =
@@ -200,40 +179,29 @@ update msg model =
         UpdateScopeExpiration index expirationStr ->
             let
                 expirationTime =
-                    if String.isEmpty expirationStr then
-                        Nothing
-
-                    else
-                        String.toInt expirationStr
+                    String.toInt expirationStr
+                        |> Maybe.withDefault 0
             in
             updateScopeConfig index (\scope -> { scope | expirationTime = expirationTime }) model
 
-        EditPermissionScript index permissionType scriptStr ->
+        UpdateScopeOwner index newOwner ->
             case model.treasuryState of
-                CreatingTreasury _ ->
+                CreatingTreasury creationData ->
                     let
-                        updatePermissions scope =
-                            let
-                                permissions =
-                                    scope.permissions
+                        newScopes =
+                            List.indexedMap
+                                (\i scope ->
+                                    if i == index then
+                                        { scope | owner = newOwner }
 
-                                newScript =
-                                    MultisigScript.Signature <| Bytes.fromHexUnchecked scriptStr
-
-                                newPermissions =
-                                    case permissionType of
-                                        DisbursePermission ->
-                                            { permissions | disburse = newScript }
-
-                                        ReorganizePermission ->
-                                            { permissions | reorganize = newScript }
-
-                                        SweepPermission ->
-                                            { permissions | sweep = newScript }
-                            in
-                            { scope | permissions = newPermissions }
+                                    else
+                                        scope
+                                )
+                                creationData.scopes
                     in
-                    updateScopeConfig index updatePermissions model
+                    ( { model | treasuryState = CreatingTreasury { creationData | scopes = newScopes } }
+                    , Cmd.none
+                    )
 
                 _ ->
                     ( model, Cmd.none )
@@ -262,21 +230,10 @@ update msg model =
             case model.treasuryState of
                 CreatingTreasury data ->
                     let
-                        -- Validate that all permissions are properly configured
+                        isValidScope : ScopeConfig -> Bool
                         isValidScope scope =
+                            -- TODO improve validation
                             not (String.isEmpty scope.name)
-                                && isValidPermissions scope.permissions
-
-                        isValidPermissions permissions =
-                            isValidScript permissions.disburse
-                                && isValidScript permissions.reorganize
-                                && isValidScript permissions.sweep
-
-                        isValidScript script =
-                            case script of
-                                _ ->
-                                    -- TODO
-                                    True
 
                         -- Other script types are considered valid for now
                         allScopesValid =
@@ -451,90 +408,53 @@ viewTreasurySelection =
 viewTreasuryCreation : TreasuryCreationData -> Html Msg
 viewTreasuryCreation data =
     let
-        -- Enhanced validation - all permissions must be filled
         isValidScope scope =
-            not (String.isEmpty scope.name)
-                && isValidPermissions scope.permissions
+            not (String.isEmpty scope.name) && not (String.isEmpty scope.owner)
 
-        isValidPermissions permissions =
-            isValidScript permissions.disburse
-                && isValidScript permissions.reorganize
-                && isValidScript permissions.sweep
-
-        isValidScript script =
-            case script of
-                _ ->
-                    -- TODO
-                    True
-
-        -- Other script types are considered valid for now
         canCreate =
             not (String.isEmpty data.treasuryId)
                 && List.all isValidScope data.scopes
+                && not (List.isEmpty data.scopes)
 
+        scopeRow : Int -> ScopeConfig -> Html Msg
         scopeRow index scope =
-            div [ Html.Attributes.style "border" "1px solid #ccc", Html.Attributes.style "padding" "10px", Html.Attributes.style "margin" "10px 0" ]
-                [ -- Scope name
-                  div []
-                    [ Html.label [] [ text "Scope Name:" ]
+            div [ Html.Attributes.class "scope-row" ]
+                [ Html.div []
+                    [ text "Name: "
                     , Html.input
-                        [ Html.Attributes.placeholder "Scope name"
+                        [ Html.Attributes.type_ "text"
+                        , Html.Attributes.placeholder "Scope name"
                         , Html.Attributes.value scope.name
                         , Html.Events.onInput (UpdateScopeName index)
                         ]
                         []
                     ]
-
-                -- Expiration time
-                , div []
-                    [ Html.label [] [ text "Expiration Time (POSIX):" ]
+                , Html.div []
+                    [ text "Owner: "
                     , Html.input
-                        [ Html.Attributes.placeholder "e.g., 1703980800"
-                        , Html.Attributes.value (Maybe.map String.fromInt scope.expirationTime |> Maybe.withDefault "")
-                        , Html.Events.onInput (UpdateScopeExpiration index)
-                        , Html.Attributes.type_ "number"
+                        [ Html.Attributes.type_ "text"
+                        , Html.Attributes.placeholder "Owner address"
+                        , Html.Attributes.value scope.owner
+                        , Html.Events.onInput (UpdateScopeOwner index)
                         ]
                         []
                     ]
-
-                -- Permissions (all required)
-                , Html.h4 [] [ text "Permissions (all required):" ]
-                , viewPermissionEditor index "Disburse" DisbursePermission scope.permissions.disburse
-                , viewPermissionEditor index "Reorganize" ReorganizePermission scope.permissions.reorganize
-                , viewPermissionEditor index "Sweep" SweepPermission scope.permissions.sweep
-
-                -- Remove scope button
-                , if List.length data.scopes > 1 then
-                    Html.button [ onClick (RemoveScope index) ] [ text "Remove Scope" ]
-
-                  else
-                    text ""
-                ]
-
-        viewPermissionEditor : Int -> String -> PermissionType -> MultisigScript -> Html Msg
-        viewPermissionEditor scopeIndex permissionName permissionType script =
-            div [ Html.Attributes.style "margin" "10px 0" ]
-                [ Html.label [] [ text (permissionName ++ ":") ]
-                , viewScriptEditor scopeIndex permissionType script
-                ]
-
-        viewScriptEditor : Int -> PermissionType -> MultisigScript -> Html Msg
-        viewScriptEditor scopeIndex permissionType script =
-            case script of
-                MultisigScript.Signature credentialHash ->
-                    div [ Html.Attributes.style "margin-left" "10px" ]
-                        [ Html.input
-                            [ Html.Attributes.placeholder "Enter credential hash (required)"
-                            , Html.Attributes.value <| Bytes.toHex credentialHash
-                            , Html.Events.onInput (EditPermissionScript scopeIndex permissionType)
-                            , Html.Attributes.style "width" "400px"
-                            ]
-                            []
+                , Html.div []
+                    [ text "Expiration time: "
+                    , Html.input
+                        [ Html.Attributes.type_ "number"
+                        , Html.Attributes.placeholder "Expiration time"
+                        , Html.Attributes.value (String.fromInt scope.expirationTime)
+                        , Html.Events.onInput (UpdateScopeExpiration index)
                         ]
-
-                _ ->
-                    div [ Html.Attributes.style "margin-left" "10px" ]
-                        [ text "Complex script editing not yet implemented" ]
+                        []
+                    ]
+                , Html.button
+                    [ onClick (RemoveScope index)
+                    , Html.Attributes.class "remove-scope-btn"
+                    ]
+                    [ text "Remove" ]
+                ]
     in
     div []
         [ Html.h2 [] [ text "Create New Treasury" ]
@@ -582,11 +502,8 @@ viewScopeDetails : Scope -> Html Msg
 viewScopeDetails scope =
     div [ Html.Attributes.style "border" "1px solid #ccc", Html.Attributes.style "padding" "10px", Html.Attributes.style "margin" "10px 0" ]
         [ Html.h4 [] [ text scope.name ]
-        , div [] [ text ("Expiration: " ++ (Maybe.map String.fromInt scope.config.expirationTime |> Maybe.withDefault "Never")) ]
-        , Html.h5 [] [ text "Permissions:" ]
-        , viewPermissionStatus "Disburse" scope.config.permissions.disburse
-        , viewPermissionStatus "Reorganize" scope.config.permissions.reorganize
-        , viewPermissionStatus "Sweep" scope.config.permissions.sweep
+        , div [] [ text ("Expiration: " ++ String.fromInt scope.config.expirationTime) ]
+        , div [] [ text <| "Owner: " ++ scope.config.owner ]
         ]
 
 
