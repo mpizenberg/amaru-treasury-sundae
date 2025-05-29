@@ -1,6 +1,7 @@
 port module Main exposing (..)
 
 import Browser
+import Bytes.Comparable as Bytes
 import Cardano.Address as Address
 import Cardano.Cip30 as Cip30
 import Cardano.Gov exposing (CostModels)
@@ -12,6 +13,7 @@ import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
 import Json.Decode as JD exposing (Value)
+import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
 import Types
 
@@ -42,6 +44,8 @@ type Msg
     | UpdateTreasuryId String
     | AddScope
     | UpdateScopeName Int String
+    | UpdateScopeExpiration Int String
+    | EditPermissionScript Int PermissionType String
     | RemoveScope Int
     | CreateTreasury
     | BackToTreasurySelection
@@ -97,7 +101,38 @@ type alias TreasuryCreationData =
 
 type alias ScopeConfig =
     { name : String
+    , expirationTime : Maybe Int -- Posix time
+    , permissions : ScopePermissions
     }
+
+
+defaultScopeConfig : ScopeConfig
+defaultScopeConfig =
+    { name = ""
+    , expirationTime = Nothing
+    , permissions = defaultScopePermissions
+    }
+
+
+type alias ScopePermissions =
+    { disburse : MultisigScript
+    , reorganize : MultisigScript
+    , sweep : MultisigScript
+    }
+
+
+defaultScopePermissions : ScopePermissions
+defaultScopePermissions =
+    { disburse = MultisigScript.AnyOf []
+    , reorganize = MultisigScript.AnyOf []
+    , sweep = MultisigScript.AnyOf []
+    }
+
+
+type PermissionType
+    = DisbursePermission
+    | ReorganizePermission
+    | SweepPermission
 
 
 type alias Treasury =
@@ -133,7 +168,7 @@ update msg model =
             ( model, toWallet (Cip30.encodeRequest (Cip30.enableWallet { id = id, extensions = [], watchInterval = Just 3 })) )
 
         StartTreasuryCreation ->
-            ( { model | treasuryState = CreatingTreasury { treasuryId = "", scopes = [ { name = "" } ] } }, Cmd.none )
+            ( { model | treasuryState = CreatingTreasury { treasuryId = "", scopes = [ defaultScopeConfig ] } }, Cmd.none )
 
         StartTreasuryReopening ->
             -- TODO: Implement treasury reopening with networking
@@ -152,7 +187,7 @@ update msg model =
                 CreatingTreasury data ->
                     let
                         newScopes =
-                            data.scopes ++ [ { name = "" } ]
+                            data.scopes ++ [ defaultScopeConfig ]
                     in
                     ( { model | treasuryState = CreatingTreasury { data | scopes = newScopes } }, Cmd.none )
 
@@ -160,20 +195,45 @@ update msg model =
                     ( model, Cmd.none )
 
         UpdateScopeName index newName ->
+            updateScopeConfig index (\scope -> { scope | name = newName }) model
+
+        UpdateScopeExpiration index expirationStr ->
+            let
+                expirationTime =
+                    if String.isEmpty expirationStr then
+                        Nothing
+
+                    else
+                        String.toInt expirationStr
+            in
+            updateScopeConfig index (\scope -> { scope | expirationTime = expirationTime }) model
+
+        EditPermissionScript index permissionType scriptStr ->
             case model.treasuryState of
-                CreatingTreasury data ->
+                CreatingTreasury _ ->
                     let
-                        updateScope i scope =
-                            if i == index then
-                                { scope | name = newName }
+                        updatePermissions scope =
+                            let
+                                permissions =
+                                    scope.permissions
 
-                            else
-                                scope
+                                newScript =
+                                    MultisigScript.Signature <| Bytes.fromHexUnchecked scriptStr
 
-                        newScopes =
-                            List.indexedMap updateScope data.scopes
+                                newPermissions =
+                                    case permissionType of
+                                        DisbursePermission ->
+                                            { permissions | disburse = newScript }
+
+                                        ReorganizePermission ->
+                                            { permissions | reorganize = newScript }
+
+                                        SweepPermission ->
+                                            { permissions | sweep = newScript }
+                            in
+                            { scope | permissions = newPermissions }
                     in
-                    ( { model | treasuryState = CreatingTreasury { data | scopes = newScopes } }, Cmd.none )
+                    updateScopeConfig index updatePermissions model
 
                 _ ->
                     ( model, Cmd.none )
@@ -188,7 +248,7 @@ update msg model =
                         -- Ensure we always have at least one scope
                         finalScopes =
                             if List.isEmpty newScopes then
-                                [ { name = "" } ]
+                                [ defaultScopeConfig ]
 
                             else
                                 newScopes
@@ -202,20 +262,69 @@ update msg model =
             case model.treasuryState of
                 CreatingTreasury data ->
                     let
-                        -- Convert scope configs to actual scopes
-                        scopes =
-                            List.map (\config -> { name = config.name, config = config }) data.scopes
+                        -- Validate that all permissions are properly configured
+                        isValidScope scope =
+                            not (String.isEmpty scope.name)
+                                && isValidPermissions scope.permissions
 
-                        treasury =
-                            { id = data.treasuryId, scopes = scopes }
+                        isValidPermissions permissions =
+                            isValidScript permissions.disburse
+                                && isValidScript permissions.reorganize
+                                && isValidScript permissions.sweep
+
+                        isValidScript script =
+                            case script of
+                                _ ->
+                                    -- TODO
+                                    True
+
+                        -- Other script types are considered valid for now
+                        allScopesValid =
+                            List.all isValidScope data.scopes
+
+                        treasuryIdValid =
+                            not (String.isEmpty data.treasuryId)
                     in
-                    ( { model | treasuryState = ManagingTreasury treasury }, Cmd.none )
+                    if treasuryIdValid && allScopesValid then
+                        let
+                            scopes =
+                                List.map (\config -> { name = config.name, config = config }) data.scopes
 
+                            treasury =
+                                { id = data.treasuryId, scopes = scopes }
+                        in
+                        ( { model | treasuryState = ManagingTreasury treasury }, Cmd.none )
+
+                    else
+                        ( model, Cmd.none )
+
+                -- Could add error handling here
                 _ ->
                     ( model, Cmd.none )
 
         BackToTreasurySelection ->
             ( { model | treasuryState = TreasurySelection }, Cmd.none )
+
+
+updateScopeConfig : Int -> (ScopeConfig -> ScopeConfig) -> Model -> ( Model, Cmd Msg )
+updateScopeConfig index updateFn model =
+    case model.treasuryState of
+        CreatingTreasury data ->
+            let
+                updateScope i scope =
+                    if i == index then
+                        updateFn scope
+
+                    else
+                        scope
+
+                newScopes =
+                    List.indexedMap updateScope data.scopes
+            in
+            ( { model | treasuryState = CreatingTreasury { data | scopes = newScopes } }, Cmd.none )
+
+        _ ->
+            ( model, Cmd.none )
 
 
 walletResponseDecoder : JD.Decoder (Cip30.Response Cip30.ApiResponse)
@@ -342,23 +451,90 @@ viewTreasurySelection =
 viewTreasuryCreation : TreasuryCreationData -> Html Msg
 viewTreasuryCreation data =
     let
+        -- Enhanced validation - all permissions must be filled
+        isValidScope scope =
+            not (String.isEmpty scope.name)
+                && isValidPermissions scope.permissions
+
+        isValidPermissions permissions =
+            isValidScript permissions.disburse
+                && isValidScript permissions.reorganize
+                && isValidScript permissions.sweep
+
+        isValidScript script =
+            case script of
+                _ ->
+                    -- TODO
+                    True
+
+        -- Other script types are considered valid for now
         canCreate =
-            not (String.isEmpty data.treasuryId) && List.all (\scope -> not (String.isEmpty scope.name)) data.scopes
+            not (String.isEmpty data.treasuryId)
+                && List.all isValidScope data.scopes
 
         scopeRow index scope =
-            div []
-                [ Html.input
-                    [ Html.Attributes.placeholder "Scope name"
-                    , Html.Attributes.value scope.name
-                    , Html.Events.onInput (UpdateScopeName index)
+            div [ Html.Attributes.style "border" "1px solid #ccc", Html.Attributes.style "padding" "10px", Html.Attributes.style "margin" "10px 0" ]
+                [ -- Scope name
+                  div []
+                    [ Html.label [] [ text "Scope Name:" ]
+                    , Html.input
+                        [ Html.Attributes.placeholder "Scope name"
+                        , Html.Attributes.value scope.name
+                        , Html.Events.onInput (UpdateScopeName index)
+                        ]
+                        []
                     ]
-                    []
+
+                -- Expiration time
+                , div []
+                    [ Html.label [] [ text "Expiration Time (POSIX):" ]
+                    , Html.input
+                        [ Html.Attributes.placeholder "e.g., 1703980800"
+                        , Html.Attributes.value (Maybe.map String.fromInt scope.expirationTime |> Maybe.withDefault "")
+                        , Html.Events.onInput (UpdateScopeExpiration index)
+                        , Html.Attributes.type_ "number"
+                        ]
+                        []
+                    ]
+
+                -- Permissions (all required)
+                , Html.h4 [] [ text "Permissions (all required):" ]
+                , viewPermissionEditor index "Disburse" DisbursePermission scope.permissions.disburse
+                , viewPermissionEditor index "Reorganize" ReorganizePermission scope.permissions.reorganize
+                , viewPermissionEditor index "Sweep" SweepPermission scope.permissions.sweep
+
+                -- Remove scope button
                 , if List.length data.scopes > 1 then
-                    Html.button [ onClick (RemoveScope index) ] [ text "Remove" ]
+                    Html.button [ onClick (RemoveScope index) ] [ text "Remove Scope" ]
 
                   else
                     text ""
                 ]
+
+        viewPermissionEditor : Int -> String -> PermissionType -> MultisigScript -> Html Msg
+        viewPermissionEditor scopeIndex permissionName permissionType script =
+            div [ Html.Attributes.style "margin" "10px 0" ]
+                [ Html.label [] [ text (permissionName ++ ":") ]
+                , viewScriptEditor scopeIndex permissionType script
+                ]
+
+        viewScriptEditor : Int -> PermissionType -> MultisigScript -> Html Msg
+        viewScriptEditor scopeIndex permissionType script =
+            case script of
+                MultisigScript.Signature credentialHash ->
+                    div [ Html.Attributes.style "margin-left" "10px" ]
+                        [ Html.input
+                            [ Html.Attributes.placeholder "Enter credential hash (required)"
+                            , Html.Attributes.value <| Bytes.toHex credentialHash
+                            , Html.Events.onInput (EditPermissionScript scopeIndex permissionType)
+                            , Html.Attributes.style "width" "400px"
+                            ]
+                            []
+                        ]
+
+                _ ->
+                    div [ Html.Attributes.style "margin-left" "10px" ]
+                        [ text "Complex script editing not yet implemented" ]
     in
     div []
         [ Html.h2 [] [ text "Create New Treasury" ]
@@ -371,13 +547,20 @@ viewTreasuryCreation data =
                 ]
                 []
             ]
-        , Html.h3 [] [ text "Scopes" ]
+        , Html.h3 [] [ text "Scopes Configuration" ]
         , div [] (List.indexedMap scopeRow data.scopes)
         , Html.button [ onClick AddScope ] [ text "Add Scope" ]
         , div []
             [ Html.button
                 [ onClick CreateTreasury
                 , Html.Attributes.disabled (not canCreate)
+                , Html.Attributes.title
+                    (if canCreate then
+                        "Create Treasury"
+
+                     else
+                        "Please fill all required fields"
+                    )
                 ]
                 [ text "Create Treasury" ]
             , Html.button [ onClick BackToTreasurySelection ] [ text "Cancel" ]
@@ -390,14 +573,31 @@ viewTreasuryManagement treasury =
     div []
         [ Html.h2 [] [ text ("Managing Treasury: " ++ treasury.id) ]
         , Html.h3 [] [ text "Scopes:" ]
-        , div [] (List.map viewScope treasury.scopes)
+        , div [] (List.map viewScopeDetails treasury.scopes)
         , Html.button [ onClick BackToTreasurySelection ] [ text "Back to Treasury Selection" ]
         ]
 
 
-viewScope : Scope -> Html Msg
-viewScope scope =
+viewScopeDetails : Scope -> Html Msg
+viewScopeDetails scope =
+    div [ Html.Attributes.style "border" "1px solid #ccc", Html.Attributes.style "padding" "10px", Html.Attributes.style "margin" "10px 0" ]
+        [ Html.h4 [] [ text scope.name ]
+        , div [] [ text ("Expiration: " ++ (Maybe.map String.fromInt scope.config.expirationTime |> Maybe.withDefault "Never")) ]
+        , Html.h5 [] [ text "Permissions:" ]
+        , viewPermissionStatus "Disburse" scope.config.permissions.disburse
+        , viewPermissionStatus "Reorganize" scope.config.permissions.reorganize
+        , viewPermissionStatus "Sweep" scope.config.permissions.sweep
+        ]
+
+
+viewPermissionStatus : String -> MultisigScript -> Html Msg
+viewPermissionStatus name script =
     div []
-        [ Html.strong [] [ text scope.name ]
-        , text " - Configuration: (to be implemented)"
+        [ text (name ++ ": ")
+        , case script of
+            MultisigScript.Signature credHash ->
+                text ("Signature required from " ++ Bytes.toHex credHash)
+
+            _ ->
+                text "Complex script configured"
         ]
