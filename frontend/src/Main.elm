@@ -1,10 +1,11 @@
 port module Main exposing (..)
 
 import Browser
-import Bytes.Comparable as Bytes
-import Cardano.Address as Address
+import Bytes.Comparable as Bytes exposing (Bytes)
+import Cardano.Address as Address exposing (CredentialHash)
 import Cardano.Cip30 as Cip30
 import Cardano.Gov exposing (CostModels)
+import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output)
 import Dict
@@ -13,8 +14,10 @@ import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
 import Json.Decode as JD exposing (Value)
+import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
+import Result.Extra
 import Types
 
 
@@ -50,15 +53,19 @@ type alias Model =
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
+    , scripts : Scripts
+    , error : Maybe String
     }
 
 
-initialModel : Model
-initialModel =
+initialModel : Scripts -> Model
+initialModel scripts =
     { protocolParams = defaultProtocolParams
     , discoveredWallets = []
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
+    , scripts = scripts
+    , error = Nothing
     }
 
 
@@ -75,10 +82,11 @@ defaultProtocolParams =
     }
 
 
-type TreasuryState
-    = TreasurySelection
-    | CreatingTreasury TreasuryCreationData
-    | ManagingTreasury Treasury
+type alias Scripts =
+    { sundaeTreasury : PlutusScript
+    , scopeOwner : PlutusScript
+    , pragma : PlutusScript
+    }
 
 
 type alias TreasuryCreationData =
@@ -114,15 +122,68 @@ type alias Scope =
     }
 
 
-init : () -> ( Model, Cmd Msg )
-init _ =
-    ( initialModel
+init : { blueprints : List Value } -> ( Model, Cmd Msg )
+init { blueprints } =
+    let
+        decodedBlueprints : List ScriptBlueprint
+        decodedBlueprints =
+            List.map (JD.decodeValue blueprintDecoder) blueprints
+                |> Result.Extra.combine
+                |> Result.withDefault []
+                |> List.concat
+
+        sundaeTreasuryBlueprint =
+            List.Extra.find (\{ name } -> name == "treasury.treasury.spend") decodedBlueprints
+
+        ( scripts, error ) =
+            case sundaeTreasuryBlueprint of
+                Nothing ->
+                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , scopeOwner = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , pragma = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      }
+                    , Just "Failed the retrieve the blueprint of the Sundae Treasury script"
+                    )
+
+                Just blueprint ->
+                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 blueprint.scriptBytes
+                      , scopeOwner = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , pragma = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      }
+                    , Nothing
+                    )
+
+        model =
+            initialModel scripts
+    in
+    ( { model | error = error }
     , toWallet <| Cip30.encodeRequest Cip30.discoverWallets
     )
 
 
+blueprintDecoder : JD.Decoder (List ScriptBlueprint)
+blueprintDecoder =
+    JD.at [ "validators" ]
+        (JD.list
+            (JD.map4 ScriptBlueprint
+                (JD.field "title" JD.string)
+                (JD.field "compiledCode" JD.string |> JD.map Bytes.fromHexUnchecked)
+                (JD.field "hash" JD.string |> JD.map Bytes.fromHexUnchecked)
+                (JD.maybe (JD.field "parameters" JD.value) |> JD.map (\p -> Maybe.map (always True) p |> Maybe.withDefault False))
+            )
+        )
 
--- UPDATE
+
+type alias ScriptBlueprint =
+    { name : String
+    , scriptBytes : Bytes ScriptCbor
+    , hash : Bytes CredentialHash
+    , hasParams : Bool
+    }
+
+
+
+-- UPDATE ############################################################
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -165,14 +226,25 @@ handleWalletMsg value model =
 
 
 
--- VIEW
+-- VIEW ##############################################################
 
 
 view : Model -> Html Msg
 view model =
     div []
         [ viewWalletSection model
+        , viewError model.error
         ]
+
+
+viewError : Maybe String -> Html msg
+viewError maybeError =
+    case maybeError of
+        Nothing ->
+            text ""
+
+        Just error ->
+            Html.pre [] [ text <| "ERROR:\n" ++ error ]
 
 
 
