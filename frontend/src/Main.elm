@@ -1,13 +1,12 @@
-port module Main exposing (..)
+port module Main exposing (main)
 
+import Api exposing (ProtocolParams)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
-import Cardano.Address as Address exposing (CredentialHash)
+import Cardano.Address as Address exposing (CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
-import Cardano.Gov exposing (CostModels)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent exposing (TxIntent)
-import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import Dict exposing (Dict)
@@ -15,6 +14,7 @@ import Dict.Any
 import Html exposing (Html, div, text)
 import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
+import Http
 import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
@@ -45,6 +45,7 @@ port fromWallet : (JD.Value -> msg) -> Sub msg
 type Msg
     = WalletMsg JD.Value
     | ConnectButtonClicked { id : String }
+    | GotNetworkParams (Result Http.Error ProtocolParams)
 
 
 
@@ -52,7 +53,8 @@ type Msg
 
 
 type alias Model =
-    { protocolParams : ProtocolParams
+    { networkId : NetworkId
+    , protocolParams : ProtocolParams
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
@@ -64,26 +66,14 @@ type alias Model =
 
 initialModel : Scripts -> Model
 initialModel scripts =
-    { protocolParams = defaultProtocolParams
+    { networkId = Testnet
+    , protocolParams = Api.defaultProtocolParams
     , discoveredWallets = []
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
     , scripts = scripts
     , treasuryManagement = TreasuryUnspecified
     , error = Nothing
-    }
-
-
-type alias ProtocolParams =
-    { costModels : CostModels
-    , registrationDeposit : Natural
-    }
-
-
-defaultProtocolParams : ProtocolParams
-defaultProtocolParams =
-    { costModels = Uplc.conwayDefaultCostModels
-    , registrationDeposit = N.fromSafeInt <| 5 * 1000 * 1000 -- ₳5
     }
 
 
@@ -151,7 +141,10 @@ init { blueprints } =
             initialModel scripts
     in
     ( { model | error = error }
-    , toWallet <| Cip30.encodeRequest Cip30.discoverWallets
+    , Cmd.batch
+        [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
+        , Api.loadProtocolParams model.networkId GotNetworkParams
+        ]
     )
 
 
@@ -188,6 +181,12 @@ update msg model =
 
         ConnectButtonClicked { id } ->
             ( model, toWallet (Cip30.encodeRequest (Cip30.enableWallet { id = id, extensions = [], watchInterval = Just 3 })) )
+
+        GotNetworkParams (Err httpError) ->
+            ( { model | error = Just <| Debug.toString httpError }, Cmd.none )
+
+        GotNetworkParams (Ok params) ->
+            ( { model | protocolParams = Debug.log "params" params }, Cmd.none )
 
 
 walletResponseDecoder : JD.Decoder (Cip30.Response Cip30.ApiResponse)
@@ -248,6 +247,23 @@ disburse scope utxoRef receivers value =
 
             else
                 Err <| "Trying to disburse more than is available in this UTxO. Overflow value is: " ++ Debug.toString overflowValue
+
+
+
+-- Scope owner
+
+
+type ScopeOwnerAction
+    = Standard
+    | SwapOrder
+    | SwapCancel
+
+
+type ScopeOwner
+    = ScopeLedger
+    | ScopeConsensus
+    | ScopeMerceneries
+    | ScopeMarketing
 
 
 
