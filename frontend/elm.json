@@ -21,6 +21,7 @@
             "elm-toulouse/cbor": "4.0.1",
             "elmcraft/core-extra": "2.1.0",
             "jxxcarlson/hex": "4.0.0",
+            "krisajenkins/remotedata": "6.1.0",
             "turboMaCk/any-dict": "2.6.0"
         },
         "indirect": {

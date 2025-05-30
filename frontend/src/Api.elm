@@ -4,13 +4,15 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (NetworkId(..))
 import Cardano.Gov exposing (CostModels)
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
+import Cardano.Transaction as Transaction
 import Cardano.Uplc as Uplc
-import Cardano.Utxo exposing (OutputReference, TransactionId)
+import Cardano.Utxo exposing (Output, OutputReference, TransactionId)
 import ConcurrentTask exposing (ConcurrentTask)
 import ConcurrentTask.Http
 import Http
 import Json.Decode as JD exposing (Decoder)
 import Json.Encode as JE
+import List.Extra
 import Natural as N exposing (Natural)
 
 
@@ -141,14 +143,36 @@ koiosLiveUtxoDecoder =
 
 
 
+-- Retrieve Output from the OutputReference
+
+
+retrieveOutput : NetworkId -> OutputReference -> ConcurrentTask String ( OutputReference, Output )
+retrieveOutput networkId utxo =
+    retrieveTxBytes networkId utxo.transactionId
+        |> ConcurrentTask.mapError Debug.toString
+        |> ConcurrentTask.andThen
+            (\txBytes ->
+                case Transaction.deserialize txBytes of
+                    Nothing ->
+                        ConcurrentTask.fail <| "Failed to deserialize the Tx bytes: " ++ Bytes.toHex txBytes
+
+                    Just tx ->
+                        List.Extra.getAt utxo.outputIndex tx.body.outputs
+                            |> Maybe.map (Tuple.pair utxo)
+                            |> Result.fromMaybe "Missing output in Tx"
+                            |> ConcurrentTask.fromResult
+            )
+
+
+
 -- Retrieve Tx
 
 
 {-| Task to retrieve the raw CBOR of a given Tx.
 It uses the Koios API, proxied through the app server (because CORS).
 -}
-retrieveTx : NetworkId -> Bytes TransactionId -> ConcurrentTask ConcurrentTask.Http.Error (Bytes a)
-retrieveTx networkId txId =
+retrieveTxBytes : NetworkId -> Bytes TransactionId -> ConcurrentTask ConcurrentTask.Http.Error (Bytes a)
+retrieveTxBytes networkId txId =
     let
         thisTxDecoder : Decoder (Bytes a)
         thisTxDecoder =
