@@ -8,13 +8,25 @@
         <div id="myapp"></div>
         <script type="module">
             import * as ElmCardano from "./elm-cardano.js";
+            import * as ConcurrentTask from "/elm-concurrent-task.js";
+            import * as Storage from "/storage.js";
+
             // Load the Main.elm compiled file
             await ElmCardano.loadMain("./main.js");
+
             // Initialize the Elm app
+            const db = await Storage.init({
+                version: 1,
+                storeNames: ["tx"],
+            });
             const sundaeBlueprint = await (await fetch("./plutus.json")).json();
             var app = Elm.Main.init({
                 node: document.getElementById("myapp"),
-                flags: { blueprints: [sundaeBlueprint] },
+                flags: {
+                    url: window.location.href,
+                    db,
+                    blueprints: [sundaeBlueprint],
+                },
             });
             // Initialize default ports for the app
             ElmCardano.init({
@@ -23,6 +35,34 @@
                 portFromElmToOgmios: null, // app.ports.toOgmios,
                 portFromOgmiosToElm: null, // app.ports.fromOgmios,
             });
+
+            // Task Port (andrewMacmurray/elm-concurrent-task)
+
+            ConcurrentTask.register({
+                tasks: {
+                    // "storage:init": async (args) => await Storage.init(args),
+                    "storage:read": async (args) => await Storage.read(args),
+                    "storage:write": async (args) => await Storage.write(args),
+                },
+                ports: {
+                    send: app.ports.sendTask,
+                    receive: app.ports.receiveTask,
+                },
+            });
+
+            // Navigation
+
+            // Inform app of browser navigation (the BACK and FORWARD buttons)
+            window.addEventListener("popstate", function () {
+                app.ports.onUrlChange.send(location.href);
+            });
+
+            // Change the URL upon request
+            // Do (// not) inform app of the change
+            // app.ports.pushUrl.subscribe(function (url) {
+            //     history.pushState({}, "", url);
+            //     // app.ports.onUrlChange.send(location.href);
+            // });
         </script>
     </body>
 </html>

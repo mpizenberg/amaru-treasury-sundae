@@ -1,8 +1,12 @@
 module Api exposing (..)
 
+import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (NetworkId(..))
 import Cardano.Gov exposing (CostModels)
 import Cardano.Uplc as Uplc
+import Cardano.Utxo exposing (TransactionId)
+import ConcurrentTask exposing (ConcurrentTask)
+import ConcurrentTask.Http
 import Http
 import Json.Decode as JD exposing (Decoder)
 import Json.Encode as JE
@@ -75,3 +79,65 @@ protocolParamsDecoder =
         (JD.at [ "result", "plutusCostModels", "plutus:v2" ] <| JD.list JD.int)
         (JD.at [ "result", "plutusCostModels", "plutus:v3" ] <| JD.list JD.int)
         (JD.at [ "result", "stakeCredentialDeposit", "ada", "lovelace" ] <| JD.map N.fromSafeInt JD.int)
+
+
+
+-- Retrieve Tx
+
+
+{-| Task to retrieve the raw CBOR of a given Tx.
+It uses the Koios API, proxied through the app server (because CORS).
+-}
+taskRetrieveTx : NetworkId -> Bytes TransactionId -> ConcurrentTask ConcurrentTask.Http.Error (Bytes a)
+taskRetrieveTx networkId txId =
+    let
+        thisTxDecoder : Decoder (Bytes a)
+        thisTxDecoder =
+            koiosFirstTxBytesDecoder
+                |> JD.andThen
+                    (\tx ->
+                        if tx.txId == txId then
+                            JD.succeed tx.txCbor
+
+                        else
+                            JD.fail <| "The retrieved Tx (" ++ Bytes.toHex tx.txId ++ ") does not correspond to the expected one (" ++ Bytes.toHex txId ++ ")"
+                    )
+    in
+    -- TODO: change to authenticated free tier Koios request
+    ConcurrentTask.Http.post
+        { url = "/proxy/json"
+        , headers = []
+        , body =
+            ConcurrentTask.Http.jsonBody
+                (JE.object
+                    [ ( "url", JE.string <| koiosUrl networkId ++ "/tx_cbor" )
+                    , ( "method", JE.string "POST" )
+                    , ( "body", JE.object [ ( "_tx_hashes", JE.list (JE.string << Bytes.toHex) [ txId ] ) ] )
+                    ]
+                )
+        , expect = ConcurrentTask.Http.expectJson thisTxDecoder
+        , timeout = Nothing
+        }
+
+
+koiosFirstTxBytesDecoder : Decoder { txId : Bytes TransactionId, txCbor : Bytes a }
+koiosFirstTxBytesDecoder =
+    let
+        oneTxBytesDecoder =
+            JD.map2 (\txId cbor -> { txId = txId, txCbor = cbor })
+                (JD.field "tx_hash" Bytes.jsonDecoder)
+                (JD.field "cbor" Bytes.jsonDecoder)
+    in
+    JD.list oneTxBytesDecoder
+        |> JD.andThen
+            (\txs ->
+                case txs of
+                    [] ->
+                        JD.fail "The Tx was not found. Maybe the request was done for the wrong network?"
+
+                    [ tx ] ->
+                        JD.succeed tx
+
+                    _ ->
+                        JD.fail "The server unexpectedly returned more than 1 transaction."
+            )

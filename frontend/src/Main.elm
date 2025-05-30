@@ -9,6 +9,7 @@ import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), Scrip
 import Cardano.TxIntent exposing (TxIntent)
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
+import ConcurrentTask
 import Dict exposing (Dict)
 import Dict.Any
 import Html exposing (Html, div, text)
@@ -24,6 +25,14 @@ import Treasury exposing (SpendConfig)
 import Types
 
 
+type alias Flags =
+    { url : String
+    , db : JD.Value
+    , blueprints : List JD.Value
+    }
+
+
+main : Program Flags Model Msg
 main =
     -- The main entry point of our app
     -- More info about that in the Browser package docs:
@@ -31,7 +40,20 @@ main =
     Browser.element
         { init = init
         , update = update
-        , subscriptions = \_ -> fromWallet WalletMsg
+        , subscriptions =
+            \model ->
+                Sub.batch
+                    [ fromWallet WalletMsg
+
+                    -- , onUrlChange (locationHrefToRoute >> UrlChanged)
+                    , onUrlChange UrlChanged
+                    , ConcurrentTask.onProgress
+                        { send = sendTask
+                        , receive = receiveTask
+                        , onProgress = OnTaskProgress
+                        }
+                        model.taskPool
+                    ]
         , view = view
         }
 
@@ -42,10 +64,31 @@ port toWallet : JD.Value -> Cmd msg
 port fromWallet : (JD.Value -> msg) -> Sub msg
 
 
+port onUrlChange : (String -> msg) -> Sub msg
+
+
+port pushUrl : String -> Cmd msg
+
+
+port sendTask : JD.Value -> Cmd msg
+
+
+port receiveTask : (JD.Value -> msg) -> Sub msg
+
+
 type Msg
-    = WalletMsg JD.Value
+    = NoMsg
+    | UrlChanged String
+    | WalletMsg JD.Value
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
+      -- Task port
+    | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
+    | OnTaskComplete (ConcurrentTask.Response String TaskCompleted)
+
+
+type TaskCompleted
+    = TaskCompleted
 
 
 
@@ -53,7 +96,10 @@ type Msg
 
 
 type alias Model =
-    { networkId : NetworkId
+    { taskPool : ConcurrentTask.Pool Msg String TaskCompleted
+    , db : JD.Value
+    , page : Page
+    , networkId : NetworkId
     , protocolParams : ProtocolParams
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
@@ -64,9 +110,12 @@ type alias Model =
     }
 
 
-initialModel : Scripts -> Model
-initialModel scripts =
-    { networkId = Testnet
+initialModel : JD.Value -> Scripts -> Model
+initialModel db scripts =
+    { taskPool = ConcurrentTask.pool
+    , db = db
+    , page = Home
+    , networkId = Testnet
     , protocolParams = Api.defaultProtocolParams
     , discoveredWallets = []
     , connectedWallet = Nothing
@@ -75,6 +124,10 @@ initialModel scripts =
     , treasuryManagement = TreasuryUnspecified
     , error = Nothing
     }
+
+
+type Page
+    = Home
 
 
 type alias Scripts =
@@ -106,8 +159,8 @@ type alias Scope =
     }
 
 
-init : { blueprints : List JD.Value } -> ( Model, Cmd Msg )
-init { blueprints } =
+init : Flags -> ( Model, Cmd Msg )
+init { url, db, blueprints } =
     let
         decodedBlueprints : List ScriptBlueprint
         decodedBlueprints =
@@ -138,7 +191,7 @@ init { blueprints } =
                     )
 
         model =
-            initialModel scripts
+            initialModel db scripts
     in
     ( { model | error = error }
     , Cmd.batch
@@ -176,6 +229,12 @@ type alias ScriptBlueprint =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        NoMsg ->
+            ( model, Cmd.none )
+
+        UrlChanged url ->
+            ( Debug.todo "", Debug.todo "" )
+
         WalletMsg value ->
             handleWalletMsg value model
 
@@ -187,6 +246,16 @@ update msg model =
 
         GotNetworkParams (Ok params) ->
             ( { model | protocolParams = Debug.log "params" params }, Cmd.none )
+
+        OnTaskProgress ( taskPool, cmd ) ->
+            ( { model | taskPool = taskPool }, cmd )
+
+        OnTaskComplete taskCompleted ->
+            handleCompletedTask taskCompleted model
+
+
+
+-- Wallet
 
 
 walletResponseDecoder : JD.Decoder (Cip30.Response Cip30.ApiResponse)
@@ -247,6 +316,23 @@ disburse scope utxoRef receivers value =
 
             else
                 Err <| "Trying to disburse more than is available in this UTxO. Overflow value is: " ++ Debug.toString overflowValue
+
+
+
+-- Tasks
+
+
+handleCompletedTask : ConcurrentTask.Response String TaskCompleted -> Model -> ( Model, Cmd Msg )
+handleCompletedTask response model =
+    case ( response, model.page ) of
+        ( ConcurrentTask.Error error, _ ) ->
+            ( { model | error = Just error }, Cmd.none )
+
+        ( ConcurrentTask.UnexpectedError error, _ ) ->
+            ( { model | error = Just <| Debug.toString error }, Cmd.none )
+
+        ( ConcurrentTask.Success _, _ ) ->
+            ( Debug.todo "", Cmd.none )
 
 
 
