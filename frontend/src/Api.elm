@@ -3,8 +3,9 @@ module Api exposing (..)
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (NetworkId(..))
 import Cardano.Gov exposing (CostModels)
+import Cardano.MultiAsset exposing (AssetName, PolicyId)
 import Cardano.Uplc as Uplc
-import Cardano.Utxo exposing (TransactionId)
+import Cardano.Utxo exposing (OutputReference, TransactionId)
 import ConcurrentTask exposing (ConcurrentTask)
 import ConcurrentTask.Http
 import Http
@@ -82,14 +83,72 @@ protocolParamsDecoder =
 
 
 
+-- Retrieve NFT UTxO
+
+
+retrieveAssetUtxo : NetworkId -> Bytes PolicyId -> Bytes AssetName -> ConcurrentTask ConcurrentTask.Http.Error OutputReference
+retrieveAssetUtxo networkId policyId assetName =
+    let
+        encodeAsset ( id, name ) =
+            JE.list identity
+                [ JE.string <| Bytes.toHex id
+                , JE.string <| Bytes.toHex name
+                ]
+    in
+    ConcurrentTask.Http.post
+        { url = koiosUrl networkId ++ "/asset_utxos"
+        , headers = [ ConcurrentTask.Http.header "Authorization" <| "Bearer " ++ koiosApiToken ]
+        , body =
+            ConcurrentTask.Http.jsonBody <|
+                JE.object [ ( "_asset_list", JE.list encodeAsset [ ( policyId, assetName ) ] ) ]
+        , expect = ConcurrentTask.Http.expectJson koiosLiveUtxoDecoder
+        , timeout = Nothing
+        }
+
+
+koiosLiveUtxoDecoder : Decoder OutputReference
+koiosLiveUtxoDecoder =
+    let
+        itemDecoder =
+            JD.map3 (\txId index isSpent -> ( txId, index, isSpent ))
+                (JD.field "tx_hash" Bytes.jsonDecoder)
+                (JD.field "tx_index" JD.int)
+                (JD.field "is_spent" JD.bool)
+    in
+    JD.list itemDecoder
+        |> JD.map
+            (List.filterMap
+                (\( txId, index, isSpent ) ->
+                    if isSpent then
+                        Nothing
+
+                    else
+                        Just <| OutputReference txId index
+                )
+            )
+        |> JD.andThen
+            (\refs ->
+                case refs of
+                    [] ->
+                        JD.fail "The UTxO was not found. Maybe the request was done for the wrong network?"
+
+                    [ ref ] ->
+                        JD.succeed ref
+
+                    _ ->
+                        JD.fail "The server unexpectedly returned more than 1 UTxO."
+            )
+
+
+
 -- Retrieve Tx
 
 
 {-| Task to retrieve the raw CBOR of a given Tx.
 It uses the Koios API, proxied through the app server (because CORS).
 -}
-taskRetrieveTx : NetworkId -> Bytes TransactionId -> ConcurrentTask ConcurrentTask.Http.Error (Bytes a)
-taskRetrieveTx networkId txId =
+retrieveTx : NetworkId -> Bytes TransactionId -> ConcurrentTask ConcurrentTask.Http.Error (Bytes a)
+retrieveTx networkId txId =
     let
         thisTxDecoder : Decoder (Bytes a)
         thisTxDecoder =
@@ -103,18 +162,12 @@ taskRetrieveTx networkId txId =
                             JD.fail <| "The retrieved Tx (" ++ Bytes.toHex tx.txId ++ ") does not correspond to the expected one (" ++ Bytes.toHex txId ++ ")"
                     )
     in
-    -- TODO: change to authenticated free tier Koios request
     ConcurrentTask.Http.post
-        { url = "/proxy/json"
-        , headers = []
+        { url = koiosUrl networkId ++ "/tx_cbor"
+        , headers = [ ConcurrentTask.Http.header "Authorization" <| "Bearer " ++ koiosApiToken ]
         , body =
-            ConcurrentTask.Http.jsonBody
-                (JE.object
-                    [ ( "url", JE.string <| koiosUrl networkId ++ "/tx_cbor" )
-                    , ( "method", JE.string "POST" )
-                    , ( "body", JE.object [ ( "_tx_hashes", JE.list (JE.string << Bytes.toHex) [ txId ] ) ] )
-                    ]
-                )
+            ConcurrentTask.Http.jsonBody <|
+                JE.object [ ( "_tx_hashes", JE.list (JE.string << Bytes.toHex) [ txId ] ) ]
         , expect = ConcurrentTask.Http.expectJson thisTxDecoder
         , timeout = Nothing
         }
