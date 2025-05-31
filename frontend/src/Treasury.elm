@@ -122,7 +122,7 @@ reorganize :
     Bytes ScriptCbor
     -> List (Bytes CredentialHash)
     -> List WithdrawalIntent
-    -> List { spentInputRef : OutputReference, spentOutput : Output }
+    -> List ( OutputReference, Output )
     -> (Value -> List TxIntent)
     -> List TxIntent
 reorganize treasuryScriptBytes requiredSigners requiredWithdrawals spentUtxos receivers =
@@ -132,7 +132,7 @@ reorganize treasuryScriptBytes requiredSigners requiredWithdrawals spentUtxos re
             -- Spend all UTxOs, and do not (yet) create the new outputs
             spentUtxos
                 |> List.concatMap
-                    (\{ spentInputRef, spentOutput } ->
+                    (\( spentInputRef, spentOutput ) ->
                         spend (SpendConfig treasuryScriptBytes requiredSigners requiredWithdrawals spentInputRef spentOutput)
                             SweepTreasury
                             (\_ -> [])
@@ -141,7 +141,7 @@ reorganize treasuryScriptBytes requiredSigners requiredWithdrawals spentUtxos re
 
         totalSpent =
             spentUtxos
-                |> List.map (\s -> s.spentOutput.amount)
+                |> List.map (\( _, spentOutput ) -> spentOutput.amount)
                 |> Value.sum
     in
     spendings ++ receivers totalSpent

@@ -3,13 +3,14 @@ port module Main exposing (main)
 import Api exposing (ProtocolParams)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
-import Cardano.Address as Address exposing (CredentialHash, NetworkId(..))
+import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Data as Data exposing (Data)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
-import Cardano.TxIntent exposing (TxIntent)
+import Cardano.TxIntent as TxIntent exposing (TxIntent, TxOtherInfo)
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
+import Cardano.Witness as Witness
 import ConcurrentTask
 import Dict
 import Dict.Any
@@ -20,6 +21,7 @@ import Http
 import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
+import Natural as N
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
@@ -224,7 +226,7 @@ type alias Scopes =
 
 
 type alias Scope =
-    { name : String
+    { owner : MultisigScript
     , ownerScript : PlutusScript
     , sundaeTreasuryScript : PlutusScript
     , registryUtxo : ( OutputReference, Output )
@@ -380,11 +382,71 @@ handleWalletMsg value model =
 
 
 
+-- Merge UTxOs
+
+
+{-| Merge all UTxOs from a given scope.
+
+REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
+
+-}
+mergeUtxos : NetworkId -> Scope -> List (Bytes CredentialHash) -> List TxIntent
+mergeUtxos networkId scope requiredSigners =
+    let
+        utxos =
+            Dict.Any.toList scope.utxos
+
+        treasuryScriptBytes =
+            Script.cborWrappedBytes scope.sundaeTreasuryScript
+
+        requiredWithdrawals =
+            -- Withdrawal with the scope owner script
+            [ { stakeCredential =
+                    { networkId = networkId
+                    , stakeCredential = ScriptHash ownerScriptHash
+                    }
+              , amount = N.zero
+              , scriptWitness =
+                    Just <|
+                        Witness.Plutus
+                            { script =
+                                ( Script.plutusVersion scope.ownerScript
+                                , Witness.ByValue <| Script.cborWrappedBytes scope.ownerScript
+                                )
+                            , redeemerData = \_ -> Debug.todo "Standard Owner Redeemer"
+                            , requiredSigners = requiredSigners
+                            }
+              }
+            ]
+
+        ownerScriptHash =
+            Script.hash <| Script.Plutus scope.ownerScript
+
+        receivers value =
+            [ TxIntent.SendTo scopeTreasuryAddress value ]
+
+        scopeTreasuryAddress =
+            case utxos of
+                ( _, { address } ) :: _ ->
+                    address
+
+                _ ->
+                    Debug.todo "impossible to have utxos = []"
+    in
+    Treasury.reorganize treasuryScriptBytes requiredSigners requiredWithdrawals utxos receivers
+
+
+
 -- Disburse
 
 
-disburse : Scope -> OutputReference -> (Value -> List TxIntent) -> Value -> Result String (List TxIntent)
-disburse scope utxoRef receivers value =
+{-| Disburse funds from one UTxO in the given scope.
+
+REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
+
+-}
+disburse : NetworkId -> Scope -> List (Bytes CredentialHash) -> OutputReference -> (Value -> List TxIntent) -> Value -> Result String (List TxIntent)
+disburse networkId scope requiredSigners utxoRef receivers value =
     case Dict.Any.get utxoRef scope.utxos of
         Nothing ->
             Err <| "The selected UTxO isn’t in the known list of UTxOs for this scope: " ++ Debug.toString utxoRef
@@ -394,11 +456,34 @@ disburse scope utxoRef receivers value =
                 spendConfig : SpendConfig
                 spendConfig =
                     { treasuryScriptBytes = Script.cborWrappedBytes scope.sundaeTreasuryScript
-                    , requiredSigners = Debug.todo ""
-                    , requiredWithdrawals = Debug.todo ""
+                    , requiredSigners = requiredSigners
+                    , requiredWithdrawals = requiredWithdrawals
                     , spentInputRef = utxoRef
                     , spentOutput = spentOutput
                     }
+
+                requiredWithdrawals =
+                    -- Withdrawal with the scope owner script
+                    [ { stakeCredential =
+                            { networkId = networkId
+                            , stakeCredential = ScriptHash ownerScriptHash
+                            }
+                      , amount = N.zero
+                      , scriptWitness =
+                            Just <|
+                                Witness.Plutus
+                                    { script =
+                                        ( Script.plutusVersion scope.ownerScript
+                                        , Witness.ByValue <| Script.cborWrappedBytes scope.ownerScript
+                                        )
+                                    , redeemerData = \_ -> Debug.todo "Standard/Swap Owner Redeemer"
+                                    , requiredSigners = requiredSigners
+                                    }
+                      }
+                    ]
+
+                ownerScriptHash =
+                    Script.hash <| Script.Plutus scope.ownerScript
 
                 overflowValue =
                     Value.subtract value spentOutput.amount
