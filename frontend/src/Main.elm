@@ -5,19 +5,21 @@ import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
+import Cardano.Data as Data exposing (Data)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent exposing (TxIntent)
-import Cardano.Utxo as Utxo exposing (Output, OutputReference)
+import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import ConcurrentTask
 import Dict
 import Dict.Any
 import Html exposing (Html, div, text)
-import Html.Attributes exposing (height, src)
+import Html.Attributes as HA exposing (height, src)
 import Html.Events exposing (onClick)
 import Http
 import Json.Decode as JD
 import List.Extra
+import MultisigScript exposing (MultisigScript)
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
@@ -155,12 +157,15 @@ type TreasuryManagement
 
 type alias LoadingTreasury =
     { rootUtxo : RemoteData String ( OutputReference, Output )
-    , scopes :
-        { ledger : LoadingScope
-        , consensus : LoadingScope
-        , merceneries : LoadingScope
-        , marketing : LoadingScope
-        }
+    , scopes : LoadingScopes
+    }
+
+
+type alias LoadingScopes =
+    { ledger : LoadingScope
+    , consensus : LoadingScope
+    , merceneries : LoadingScope
+    , marketing : LoadingScope
     }
 
 
@@ -177,26 +182,44 @@ startLoadingTreasury =
 
 
 type alias LoadingScope =
-    { registryUtxo : RemoteData String ( OutputReference, Output )
+    { owner : Maybe MultisigScript
+    , registryUtxo : RemoteData String ( OutputReference, Output )
     , scopeUtxos : RemoteData String (Utxo.RefDict Output)
     }
 
 
 startLoadingScope : LoadingScope
 startLoadingScope =
-    { registryUtxo = RemoteData.Loading
+    { owner = Nothing
+    , registryUtxo = RemoteData.Loading
     , scopeUtxos = RemoteData.Loading
     }
 
 
+failedBeforeLoadingScope : String -> LoadingScope
+failedBeforeLoadingScope failure =
+    { owner = Nothing
+    , registryUtxo = RemoteData.Failure failure
+    , scopeUtxos = RemoteData.Failure failure
+    }
+
+
+initLoadingScopeWithOwner : MultisigScript -> LoadingScope
+initLoadingScopeWithOwner owner =
+    { startLoadingScope | owner = Just owner }
+
+
 type alias LoadedTreasury =
     { rootUtxo : ( OutputReference, Output )
-    , scopes :
-        { ledger : Scope
-        , consensus : Scope
-        , merceneries : Scope
-        , marketing : Scope
-        }
+    , scopes : Scopes
+    }
+
+
+type alias Scopes =
+    { ledger : Scope
+    , consensus : Scope
+    , merceneries : Scope
+    , marketing : Scope
     }
 
 
@@ -314,7 +337,7 @@ update msg model =
             ( { model | error = Just <| Debug.toString httpError }, Cmd.none )
 
         GotNetworkParams (Ok params) ->
-            ( { model | protocolParams = Debug.log "params" params }, Cmd.none )
+            ( { model | protocolParams = params }, Cmd.none )
 
         OnTaskProgress ( taskPool, cmd ) ->
             ( { model | taskPool = taskPool }, cmd )
@@ -420,7 +443,62 @@ handleCompletedTask model taskCompleted =
 
 setPragmaUtxo : OutputReference -> Output -> LoadingTreasury -> TreasuryManagement
 setPragmaUtxo ref output loading =
-    TreasuryLoading { loading | rootUtxo = RemoteData.Success ( ref, output ) }
+    let
+        scopes =
+            case output.datumOption of
+                Just (DatumValue { rawBytes }) ->
+                    case Data.fromBytes rawBytes of
+                        Nothing ->
+                            scopesError "The PRAGMA UTxO datum does not contain valid Data."
+
+                        Just data ->
+                            initLoadingScopesFromData data
+
+                _ ->
+                    scopesError "The PRAGMA UTxO does not contain a valid datum"
+    in
+    TreasuryLoading
+        { loading
+            | rootUtxo = RemoteData.Success ( ref, output )
+            , scopes = scopes
+        }
+
+
+scopesError : String -> LoadingScopes
+scopesError error =
+    { ledger = failedBeforeLoadingScope error
+    , consensus = failedBeforeLoadingScope error
+    , merceneries = failedBeforeLoadingScope error
+    , marketing = failedBeforeLoadingScope error
+    }
+
+
+initLoadingScopesFromData : Data -> LoadingScopes
+initLoadingScopesFromData data =
+    case data of
+        Data.Constr _ [ owner1, owner2, owner3, owner4 ] ->
+            case ( ( MultisigScript.fromData owner1, MultisigScript.fromData owner2 ), ( MultisigScript.fromData owner3, MultisigScript.fromData owner4 ) ) of
+                ( ( Just ms1, Just ms2 ), ( Just ms3, Just ms4 ) ) ->
+                    { ledger = initLoadingScopeWithOwner ms1
+                    , consensus = initLoadingScopeWithOwner ms2
+                    , merceneries = initLoadingScopeWithOwner ms3
+                    , marketing = initLoadingScopeWithOwner ms4
+                    }
+
+                ( ( Nothing, _ ), _ ) ->
+                    scopesError "The first scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+
+                ( ( _, Nothing ), _ ) ->
+                    scopesError "The second scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+
+                ( _, ( Nothing, _ ) ) ->
+                    scopesError "The third scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+
+                ( _, ( _, Nothing ) ) ->
+                    scopesError "The fourth scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+
+        _ ->
+            scopesError "The PRAGMA UTxO does not contain exactly 4 owners"
 
 
 
@@ -532,40 +610,52 @@ viewLoadingRootUtxo rootUtxo =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { registryUtxo, scopeUtxos } =
-    div []
-        [ viewRegistryUtxo scopeName registryUtxo
-        , viewScopeUtxos scopeName scopeUtxos
+viewLoadingScope scopeName { owner, registryUtxo, scopeUtxos } =
+    div [ HA.style "border" "1px solid black" ]
+        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
+        , viewOwner owner
+        , viewRegistryUtxo registryUtxo
+        , viewScopeUtxos scopeUtxos
         ]
 
 
-viewRegistryUtxo : String -> RemoteData String ( OutputReference, Output ) -> Html msg
-viewRegistryUtxo scopeName registryUtxo =
+viewOwner : Maybe MultisigScript -> Html msg
+viewOwner maybeOwner =
+    case maybeOwner of
+        Nothing ->
+            Html.p [] [ text <| "Unknow owner" ]
+
+        Just owner ->
+            Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
+
+
+viewRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
+viewRegistryUtxo registryUtxo =
     case registryUtxo of
         RemoteData.NotAsked ->
-            Html.p [] [ text <| "Registry UTxO of " ++ scopeName ++ " not asked" ]
+            Html.p [] [ text <| "Registry UTxO not asked" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text <| "Registry UTxO of " ++ scopeName ++ " loading ..." ]
+            Html.p [] [ text <| "Registry UTxO loading ..." ]
 
         RemoteData.Failure error ->
-            Html.p [] [ text <| "Registry UTxO of " ++ scopeName ++ " failed to load: " ++ error ]
+            Html.p [] [ text <| "Registry UTxO failed to load: " ++ error ]
 
         RemoteData.Success _ ->
-            Html.p [] [ text <| "Registry UTxO of " ++ scopeName ++ "  loaded" ]
+            Html.p [] [ text <| "Registry UTxO loaded" ]
 
 
-viewScopeUtxos : String -> RemoteData String (Utxo.RefDict Output) -> Html msg
-viewScopeUtxos scopeName loadingUtxos =
+viewScopeUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
+viewScopeUtxos loadingUtxos =
     case loadingUtxos of
         RemoteData.NotAsked ->
-            Html.p [] [ text <| "Scope UTxOs of " ++ scopeName ++ "  not asked" ]
+            Html.p [] [ text <| "Scope UTxOs not asked" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text <| "Scope UTxOs of " ++ scopeName ++ "  loading ..." ]
+            Html.p [] [ text <| "Scope UTxOs loading ..." ]
 
         RemoteData.Failure error ->
-            Html.p [] [ text <| "Scope UTxOs of " ++ scopeName ++ "  failed to load: " ++ error ]
+            Html.p [] [ text <| "Scope UTxOs failed to load: " ++ error ]
 
         RemoteData.Success _ ->
-            Html.p [] [ text <| "Scope UTxOs of " ++ scopeName ++ "  loaded" ]
+            Html.p [] [ text <| "Scope UTxOs loaded" ]
