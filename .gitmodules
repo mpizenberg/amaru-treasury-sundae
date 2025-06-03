@@ -1,3 +1,6 @@
 [submodule "frontend/elm-cardano"]
 	path = frontend/elm-cardano
 	url = https://github.com/elm-cardano/elm-cardano.git
+[submodule "amaru-treasury"]
+	path = amaru-treasury
+	url = https://github.com/pragma-org/amaru-treasury.git
