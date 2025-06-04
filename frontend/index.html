@@ -29,12 +29,18 @@
             const amaruBlueprint = await (
                 await fetch("./amaru-plutus.json")
             ).json();
+            // TODO: ideally this seed UTxO also comes from a file inside amaru-build/
+            const registriesSeedUtxo = {
+                txId: "666c84705006c796f74e3410114244ceddc88041141b7d17bc81846b20386edd",
+                outputIndex: 1,
+            };
             var app = Elm.Main.init({
                 node: document.getElementById("myapp"),
                 flags: {
                     url: window.location.href,
                     db,
                     pragmaScriptHash,
+                    registriesSeedUtxo,
                     blueprints: [sundaeBlueprint, amaruBlueprint],
                 },
             });

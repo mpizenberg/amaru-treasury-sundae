@@ -6,6 +6,7 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Data as Data exposing (Data)
+import Cardano.MultiAsset exposing (PolicyId)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent as TxIntent exposing (TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
@@ -33,6 +34,7 @@ type alias Flags =
     { url : String
     , db : JD.Value
     , pragmaScriptHash : String
+    , registriesSeedUtxo : { txId : String, outputIndex : Int }
     , blueprints : List JD.Value
     }
 
@@ -110,14 +112,15 @@ type alias Model =
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
     , pragmaScriptHash : Bytes CredentialHash
+    , registriesSeedUtxo : OutputReference
     , scripts : Scripts
     , treasuryManagement : TreasuryManagement
     , error : Maybe String
     }
 
 
-initialModel : JD.Value -> String -> Scripts -> Model
-initialModel db pragmaScriptHash scripts =
+initialModel : JD.Value -> String -> ( String, Int ) -> Scripts -> Model
+initialModel db pragmaScriptHash ( txId, outputIndex ) scripts =
     { taskPool = ConcurrentTask.pool
     , db = db
     , page = Home
@@ -127,6 +130,7 @@ initialModel db pragmaScriptHash scripts =
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
     , pragmaScriptHash = Bytes.fromHexUnchecked pragmaScriptHash
+    , registriesSeedUtxo = OutputReference (Bytes.fromHexUnchecked txId) outputIndex
     , scripts = scripts
     , treasuryManagement = TreasuryUnspecified
     , error = Nothing
@@ -139,6 +143,7 @@ type Page
 
 type alias Scripts =
     { sundaeTreasury : PlutusScript
+    , registryTrap : PlutusScript
     , scopePermissions : PlutusScript
     }
 
@@ -163,14 +168,23 @@ type alias LoadingScopes =
     }
 
 
-initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> LoadingTreasury
-initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash =
+initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> LoadingTreasury
+initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo =
+    let
+        initLoadingScopeWithIndex index =
+            initLoadingScope
+                unappliedScopePermissionScript
+                pragmaScriptHash
+                unappliedRegistryTrapScript
+                registriesSeedUtxo
+                index
+    in
     { rootUtxo = RemoteData.Loading
     , scopes =
-        { ledger = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 0
-        , consensus = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 1
-        , merceneries = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 2
-        , marketing = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 3
+        { ledger = initLoadingScopeWithIndex 0
+        , consensus = initLoadingScopeWithIndex 1
+        , merceneries = initLoadingScopeWithIndex 2
+        , marketing = initLoadingScopeWithIndex 3
         }
     }
 
@@ -178,23 +192,32 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash =
 type alias LoadingScope =
     { owner : Maybe MultisigScript
     , permissionsScriptApplied : Result String ( Bytes CredentialHash, PlutusScript )
+    , registryNftPolicyId : Result String (Bytes PolicyId)
     , registryUtxo : RemoteData String ( OutputReference, Output )
     , scopeUtxos : RemoteData String (Utxo.RefDict Output)
     }
 
 
-initLoadingScope : PlutusScript -> Bytes CredentialHash -> Int -> LoadingScope
-initLoadingScope unappliedScopePermissionScript pragmaScriptHash scopeIndex =
+initLoadingScope : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Int -> LoadingScope
+initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo scopeIndex =
     let
-        result =
+        permissionsScriptResult =
             Uplc.applyParamsToScript
                 [ Data.Bytes <| Bytes.toAny pragmaScriptHash
                 , Data.Constr (N.fromSafeInt scopeIndex) [] -- the scope Data representation
                 ]
                 unappliedScopePermissionScript
+
+        registryScriptResult =
+            Uplc.applyParamsToScript
+                [ Utxo.outputReferenceToData registriesSeedUtxo
+                , Data.Constr (N.fromSafeInt scopeIndex) [] -- the scope Data representation
+                ]
+                unappliedRegistryTrapScript
     in
     { owner = Nothing
-    , permissionsScriptApplied = Result.map (\script -> ( Script.hash <| Script.Plutus script, script )) result
+    , permissionsScriptApplied = Result.map (\script -> ( Script.hash <| Script.Plutus script, script )) permissionsScriptResult
+    , registryNftPolicyId = Result.map (Script.hash << Script.Plutus) registryScriptResult
     , registryUtxo = RemoteData.Loading
     , scopeUtxos = RemoteData.Loading
     }
@@ -204,6 +227,7 @@ failedBeforeLoadingScope : String -> LoadingScope
 failedBeforeLoadingScope failure =
     { owner = Nothing
     , permissionsScriptApplied = Err failure
+    , registryNftPolicyId = Err failure
     , registryUtxo = RemoteData.Failure failure
     , scopeUtxos = RemoteData.Failure failure
     }
@@ -235,7 +259,7 @@ type alias Scope =
 
 
 init : Flags -> ( Model, Cmd Msg )
-init { db, pragmaScriptHash, blueprints } =
+init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
     let
         decodedBlueprints : List ScriptBlueprint
         decodedBlueprints =
@@ -247,34 +271,32 @@ init { db, pragmaScriptHash, blueprints } =
         sundaeTreasuryBlueprint =
             List.Extra.find (\{ name } -> name == "treasury.treasury.spend") decodedBlueprints
 
+        registryBlueprint =
+            List.Extra.find (\{ name } -> name == "traps.treasury_registry.spend") decodedBlueprints
+
         amaruTreasuryBlueprint =
             List.Extra.find (\{ name } -> name == "permissions.permissions.withdraw") decodedBlueprints
 
         ( scripts, error ) =
-            case ( sundaeTreasuryBlueprint, amaruTreasuryBlueprint ) of
-                ( Nothing, _ ) ->
-                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
-                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
-                      }
-                    , Just "Failed the retrieve the blueprint of the Sundae Treasury script. Did you forget to build the aiken code?"
-                    )
-
-                ( _, Nothing ) ->
-                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
-                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
-                      }
-                    , Just "Failed the retrieve the blueprint of the Amaru Treasury script. Did you forget to build the aiken code?"
-                    )
-
-                ( Just treasury, Just amaru ) ->
+            case ( sundaeTreasuryBlueprint, registryBlueprint, amaruTreasuryBlueprint ) of
+                ( Just treasury, Just registry, Just amaru ) ->
                     ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 treasury.scriptBytes
+                      , registryTrap = Script.plutusScriptFromBytes PlutusV3 registry.scriptBytes
                       , scopePermissions = Script.plutusScriptFromBytes PlutusV3 amaru.scriptBytes
                       }
                     , Nothing
                     )
 
+                _ ->
+                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , registryTrap = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      }
+                    , Just "Failed the retrieve some of the Plutus blueprints. Did you forget to build the aiken code?"
+                    )
+
         model =
-            initialModel db pragmaScriptHash scripts
+            initialModel db pragmaScriptHash ( registriesSeedUtxo.txId, registriesSeedUtxo.outputIndex ) scripts
 
         -- Load Pragma UTxO
         ( updatedTaskPool, loadPragmaUtxoCmd ) =
@@ -290,7 +312,13 @@ init { db, pragmaScriptHash, blueprints } =
     in
     ( { model
         | taskPool = updatedTaskPool
-        , treasuryManagement = TreasuryLoading <| initLoadingTreasury model.scripts.scopePermissions model.pragmaScriptHash
+        , treasuryManagement =
+            TreasuryLoading <|
+                initLoadingTreasury
+                    model.scripts.scopePermissions
+                    model.pragmaScriptHash
+                    model.scripts.registryTrap
+                    model.registriesSeedUtxo
         , error = error
       }
     , Cmd.batch
@@ -701,11 +729,12 @@ viewLoadingRootUtxo rootUtxo =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, permissionsScriptApplied, registryUtxo, scopeUtxos } =
+viewLoadingScope scopeName { owner, permissionsScriptApplied, registryNftPolicyId, registryUtxo, scopeUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
         , viewPermissionsScript permissionsScriptApplied
+        , viewRegistryNftPolicyId registryNftPolicyId
         , viewRegistryUtxo registryUtxo
         , viewScopeUtxos scopeUtxos
         ]
@@ -729,6 +758,16 @@ viewPermissionsScript scriptResult =
 
         Ok ( hash, _ ) ->
             Html.p [] [ text <| "Fully applied plutus script hash: " ++ Bytes.toHex hash ]
+
+
+viewRegistryNftPolicyId : Result String (Bytes PolicyId) -> Html msg
+viewRegistryNftPolicyId policyIdResult =
+    case policyIdResult of
+        Err error ->
+            Html.p [] [ text <| "Error while computing the policy ID of the registry trap: " ++ error ]
+
+        Ok policyId ->
+            Html.p [] [ text <| "Registry trap policy ID: " ++ Bytes.toHex policyId ]
 
 
 viewRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
