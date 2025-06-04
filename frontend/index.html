@@ -26,13 +26,16 @@
             const sundaeBlueprint = await (
                 await fetch("./sundae-plutus.json")
             ).json();
+            const amaruBlueprint = await (
+                await fetch("./amaru-plutus.json")
+            ).json();
             var app = Elm.Main.init({
                 node: document.getElementById("myapp"),
                 flags: {
                     url: window.location.href,
                     db,
                     pragmaScriptHash,
-                    blueprints: [sundaeBlueprint],
+                    blueprints: [sundaeBlueprint, amaruBlueprint],
                 },
             });
             // Initialize default ports for the app

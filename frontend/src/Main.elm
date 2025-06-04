@@ -138,7 +138,7 @@ type Page
 
 type alias Scripts =
     { sundaeTreasury : PlutusScript
-    , scopeOwner : PlutusScript
+    , scopePermissions : PlutusScript
     }
 
 
@@ -240,18 +240,28 @@ init { db, pragmaScriptHash, blueprints } =
         sundaeTreasuryBlueprint =
             List.Extra.find (\{ name } -> name == "treasury.treasury.spend") decodedBlueprints
 
+        amaruTreasuryBlueprint =
+            List.Extra.find (\{ name } -> name == "permissions.permissions.withdraw") decodedBlueprints
+
         ( scripts, error ) =
-            case sundaeTreasuryBlueprint of
-                Nothing ->
+            case ( sundaeTreasuryBlueprint, amaruTreasuryBlueprint ) of
+                ( Nothing, _ ) ->
                     ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
-                      , scopeOwner = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
                       }
-                    , Just "Failed the retrieve the blueprint of the Sundae Treasury script"
+                    , Just "Failed the retrieve the blueprint of the Sundae Treasury script. Did you forget to build the aiken code?"
                     )
 
-                Just blueprint ->
-                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 blueprint.scriptBytes
-                      , scopeOwner = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                ( _, Nothing ) ->
+                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      }
+                    , Just "Failed the retrieve the blueprint of the Amaru Treasury script. Did you forget to build the aiken code?"
+                    )
+
+                ( Just treasury, Just amaru ) ->
+                    ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 treasury.scriptBytes
+                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 amaru.scriptBytes
                       }
                     , Nothing
                     )
