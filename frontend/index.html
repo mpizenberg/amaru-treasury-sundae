@@ -19,12 +19,19 @@
                 version: 1,
                 storeNames: ["tx"],
             });
-            const sundaeBlueprint = await (await fetch("./plutus.json")).json();
+            const pragmaBlueprint = await (
+                await fetch("./amaru-build/scopes.plutus.json")
+            ).json();
+            const pragmaScriptHash = pragmaBlueprint.validators[0].hash;
+            const sundaeBlueprint = await (
+                await fetch("./sundae-plutus.json")
+            ).json();
             var app = Elm.Main.init({
                 node: document.getElementById("myapp"),
                 flags: {
                     url: window.location.href,
                     db,
+                    pragmaScriptHash,
                     blueprints: [sundaeBlueprint],
                 },
             });
