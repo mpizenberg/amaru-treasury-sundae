@@ -8,6 +8,7 @@ import Cardano.Cip30 as Cip30
 import Cardano.Data as Data exposing (Data)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent as TxIntent exposing (TxIntent, TxOtherInfo)
+import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
@@ -162,28 +163,38 @@ type alias LoadingScopes =
     }
 
 
-startLoadingTreasury : LoadingTreasury
-startLoadingTreasury =
+initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> LoadingTreasury
+initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash =
     { rootUtxo = RemoteData.Loading
     , scopes =
-        { ledger = startLoadingScope
-        , consensus = startLoadingScope
-        , merceneries = startLoadingScope
-        , marketing = startLoadingScope
+        { ledger = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 0
+        , consensus = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 1
+        , merceneries = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 2
+        , marketing = initLoadingScope unappliedScopePermissionScript pragmaScriptHash 3
         }
     }
 
 
 type alias LoadingScope =
     { owner : Maybe MultisigScript
+    , permissionsScriptApplied : Result String ( Bytes CredentialHash, PlutusScript )
     , registryUtxo : RemoteData String ( OutputReference, Output )
     , scopeUtxos : RemoteData String (Utxo.RefDict Output)
     }
 
 
-startLoadingScope : LoadingScope
-startLoadingScope =
+initLoadingScope : PlutusScript -> Bytes CredentialHash -> Int -> LoadingScope
+initLoadingScope unappliedScopePermissionScript pragmaScriptHash scopeIndex =
+    let
+        result =
+            Uplc.applyParamsToScript
+                [ Data.Bytes <| Bytes.toAny pragmaScriptHash
+                , Data.Constr (N.fromSafeInt scopeIndex) [] -- the scope Data representation
+                ]
+                unappliedScopePermissionScript
+    in
     { owner = Nothing
+    , permissionsScriptApplied = Result.map (\script -> ( Script.hash <| Script.Plutus script, script )) result
     , registryUtxo = RemoteData.Loading
     , scopeUtxos = RemoteData.Loading
     }
@@ -192,14 +203,10 @@ startLoadingScope =
 failedBeforeLoadingScope : String -> LoadingScope
 failedBeforeLoadingScope failure =
     { owner = Nothing
+    , permissionsScriptApplied = Err failure
     , registryUtxo = RemoteData.Failure failure
     , scopeUtxos = RemoteData.Failure failure
     }
-
-
-initLoadingScopeWithOwner : MultisigScript -> LoadingScope
-initLoadingScopeWithOwner owner =
-    { startLoadingScope | owner = Just owner }
 
 
 type alias LoadedTreasury =
@@ -283,7 +290,7 @@ init { db, pragmaScriptHash, blueprints } =
     in
     ( { model
         | taskPool = updatedTaskPool
-        , treasuryManagement = TreasuryLoading startLoadingTreasury
+        , treasuryManagement = TreasuryLoading <| initLoadingTreasury model.scripts.scopePermissions model.pragmaScriptHash
         , error = error
       }
     , Cmd.batch
@@ -536,7 +543,7 @@ setPragmaUtxo ref output loading =
                             scopesError "The PRAGMA UTxO datum does not contain valid Data."
 
                         Just data ->
-                            initLoadingScopesFromData data
+                            updateLoadingScopesFromData data loading.scopes
 
                 _ ->
                     scopesError "The PRAGMA UTxO does not contain a valid datum"
@@ -557,16 +564,16 @@ scopesError error =
     }
 
 
-initLoadingScopesFromData : Data -> LoadingScopes
-initLoadingScopesFromData data =
+updateLoadingScopesFromData : Data -> LoadingScopes -> LoadingScopes
+updateLoadingScopesFromData data { ledger, consensus, merceneries, marketing } =
     case data of
         Data.Constr _ [ owner1, owner2, owner3, owner4 ] ->
             case ( ( MultisigScript.fromData owner1, MultisigScript.fromData owner2 ), ( MultisigScript.fromData owner3, MultisigScript.fromData owner4 ) ) of
                 ( ( Just ms1, Just ms2 ), ( Just ms3, Just ms4 ) ) ->
-                    { ledger = initLoadingScopeWithOwner ms1
-                    , consensus = initLoadingScopeWithOwner ms2
-                    , merceneries = initLoadingScopeWithOwner ms3
-                    , marketing = initLoadingScopeWithOwner ms4
+                    { ledger = { ledger | owner = Just ms1 }
+                    , consensus = { consensus | owner = Just ms2 }
+                    , merceneries = { merceneries | owner = Just ms3 }
+                    , marketing = { marketing | owner = Just ms4 }
                     }
 
                 ( ( Nothing, _ ), _ ) ->
@@ -694,10 +701,11 @@ viewLoadingRootUtxo rootUtxo =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, registryUtxo, scopeUtxos } =
+viewLoadingScope scopeName { owner, permissionsScriptApplied, registryUtxo, scopeUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
+        , viewPermissionsScript permissionsScriptApplied
         , viewRegistryUtxo registryUtxo
         , viewScopeUtxos scopeUtxos
         ]
@@ -711,6 +719,16 @@ viewOwner maybeOwner =
 
         Just owner ->
             Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
+
+
+viewPermissionsScript : Result String ( Bytes CredentialHash, PlutusScript ) -> Html msg
+viewPermissionsScript scriptResult =
+    case scriptResult of
+        Err error ->
+            Html.p [] [ text <| "Error while computing fully applied permissions script: " ++ error ]
+
+        Ok ( hash, _ ) ->
+            Html.p [] [ text <| "Fully applied plutus script hash: " ++ Bytes.toHex hash ]
 
 
 viewRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
