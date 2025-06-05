@@ -168,7 +168,7 @@ type alias LoadingScopes =
     }
 
 
-initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> LoadingTreasury
+initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Result String LoadingTreasury
 initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo =
     let
         initLoadingScopeWithIndex index =
@@ -178,27 +178,29 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
                 unappliedRegistryTrapScript
                 registriesSeedUtxo
                 index
+
+        loadingTreasury ledger consensus merceneries marketing =
+            { rootUtxo = RemoteData.Loading
+            , scopes = LoadingScopes ledger consensus merceneries marketing
+            }
     in
-    { rootUtxo = RemoteData.Loading
-    , scopes =
-        { ledger = initLoadingScopeWithIndex 0
-        , consensus = initLoadingScopeWithIndex 1
-        , merceneries = initLoadingScopeWithIndex 2
-        , marketing = initLoadingScopeWithIndex 3
-        }
-    }
+    Result.map4 loadingTreasury
+        (initLoadingScopeWithIndex 0)
+        (initLoadingScopeWithIndex 1)
+        (initLoadingScopeWithIndex 2)
+        (initLoadingScopeWithIndex 3)
 
 
 type alias LoadingScope =
     { owner : Maybe MultisigScript
-    , permissionsScriptApplied : Result String ( Bytes CredentialHash, PlutusScript )
-    , registryNftPolicyId : Result String (Bytes PolicyId)
+    , permissionsScriptApplied : ( Bytes CredentialHash, PlutusScript )
+    , registryNftPolicyId : Bytes PolicyId
     , registryUtxo : RemoteData String ( OutputReference, Output )
     , scopeUtxos : RemoteData String (Utxo.RefDict Output)
     }
 
 
-initLoadingScope : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Int -> LoadingScope
+initLoadingScope : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Int -> Result String LoadingScope
 initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo scopeIndex =
     let
         permissionsScriptResult =
@@ -214,23 +216,16 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
                 , Data.Constr (N.fromSafeInt scopeIndex) [] -- the scope Data representation
                 ]
                 unappliedRegistryTrapScript
+
+        loadingScope permissionsScript registryScript =
+            { owner = Nothing
+            , permissionsScriptApplied = ( Script.hash <| Script.Plutus permissionsScript, permissionsScript )
+            , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
+            , registryUtxo = RemoteData.Loading
+            , scopeUtxos = RemoteData.Loading
+            }
     in
-    { owner = Nothing
-    , permissionsScriptApplied = Result.map (\script -> ( Script.hash <| Script.Plutus script, script )) permissionsScriptResult
-    , registryNftPolicyId = Result.map (Script.hash << Script.Plutus) registryScriptResult
-    , registryUtxo = RemoteData.Loading
-    , scopeUtxos = RemoteData.Loading
-    }
-
-
-failedBeforeLoadingScope : String -> LoadingScope
-failedBeforeLoadingScope failure =
-    { owner = Nothing
-    , permissionsScriptApplied = Err failure
-    , registryNftPolicyId = Err failure
-    , registryUtxo = RemoteData.Failure failure
-    , scopeUtxos = RemoteData.Failure failure
-    }
+    Result.map2 loadingScope permissionsScriptResult registryScriptResult
 
 
 type alias LoadedTreasury =
@@ -277,7 +272,7 @@ init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
         amaruTreasuryBlueprint =
             List.Extra.find (\{ name } -> name == "permissions.permissions.withdraw") decodedBlueprints
 
-        ( scripts, error ) =
+        ( scripts, blueprintError ) =
             case ( sundaeTreasuryBlueprint, registryBlueprint, amaruTreasuryBlueprint ) of
                 ( Just treasury, Just registry, Just amaru ) ->
                     ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 treasury.scriptBytes
@@ -309,24 +304,32 @@ init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
                     , send = sendTask
                     , onComplete = OnTaskComplete
                     }
+
+        loadingTreasuryResult =
+            initLoadingTreasury
+                model.scripts.scopePermissions
+                model.pragmaScriptHash
+                model.scripts.registryTrap
+                model.registriesSeedUtxo
     in
-    ( { model
-        | taskPool = updatedTaskPool
-        , treasuryManagement =
-            TreasuryLoading <|
-                initLoadingTreasury
-                    model.scripts.scopePermissions
-                    model.pragmaScriptHash
-                    model.scripts.registryTrap
-                    model.registriesSeedUtxo
-        , error = error
-      }
-    , Cmd.batch
-        [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
-        , Api.loadProtocolParams model.networkId GotNetworkParams
-        , loadPragmaUtxoCmd
-        ]
-    )
+    case ( blueprintError, loadingTreasuryResult ) of
+        ( Nothing, Ok loadingTreasury ) ->
+            ( { model
+                | taskPool = updatedTaskPool
+                , treasuryManagement = TreasuryLoading loadingTreasury
+              }
+            , Cmd.batch
+                [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
+                , Api.loadProtocolParams model.networkId GotNetworkParams
+                , loadPragmaUtxoCmd
+                ]
+            )
+
+        ( Just error, _ ) ->
+            ( { model | error = Just error }, Cmd.none )
+
+        ( _, Err error ) ->
+            ( { model | error = Just error }, Cmd.none )
 
 
 blueprintDecoder : JD.Decoder (List ScriptBlueprint)
@@ -552,7 +555,12 @@ handleCompletedTask model taskCompleted =
         LoadedPragmaUtxo ( ref, output ) ->
             case model.treasuryManagement of
                 TreasuryLoading loadingTreasury ->
-                    ( { model | treasuryManagement = setPragmaUtxo ref output loadingTreasury }
+                    ( setPragmaUtxo ref output loadingTreasury
+                        |> Result.map (\treasuryManagement -> { model | treasuryManagement = treasuryManagement })
+                        |> Result.Extra.extract (\error -> { model | error = Just error })
+                      -- TODO: task to retrieve the registry UTxOs (outputs in the same Tx)
+                      -- TODO: task to retrieve the scope UTxOs
+                      -- TODO: probably all utxo retrieving can be done in a single Koios request!
                     , Cmd.none
                     )
 
@@ -560,7 +568,7 @@ handleCompletedTask model taskCompleted =
                     ( Debug.todo "", Cmd.none )
 
 
-setPragmaUtxo : OutputReference -> Output -> LoadingTreasury -> TreasuryManagement
+setPragmaUtxo : OutputReference -> Output -> LoadingTreasury -> Result String TreasuryManagement
 setPragmaUtxo ref output loading =
     let
         scopes =
@@ -568,56 +576,51 @@ setPragmaUtxo ref output loading =
                 Just (DatumValue { rawBytes }) ->
                     case Data.fromBytes rawBytes of
                         Nothing ->
-                            scopesError "The PRAGMA UTxO datum does not contain valid Data."
+                            Err "The PRAGMA UTxO datum does not contain valid Data."
 
                         Just data ->
                             updateLoadingScopesFromData data loading.scopes
 
                 _ ->
-                    scopesError "The PRAGMA UTxO does not contain a valid datum"
+                    Err "The PRAGMA UTxO does not contain a valid datum"
+
+        treasuryLoading okScopes =
+            TreasuryLoading
+                { loading
+                    | rootUtxo = RemoteData.Success ( ref, output )
+                    , scopes = okScopes
+                }
     in
-    TreasuryLoading
-        { loading
-            | rootUtxo = RemoteData.Success ( ref, output )
-            , scopes = scopes
-        }
+    Result.map treasuryLoading scopes
 
 
-scopesError : String -> LoadingScopes
-scopesError error =
-    { ledger = failedBeforeLoadingScope error
-    , consensus = failedBeforeLoadingScope error
-    , merceneries = failedBeforeLoadingScope error
-    , marketing = failedBeforeLoadingScope error
-    }
-
-
-updateLoadingScopesFromData : Data -> LoadingScopes -> LoadingScopes
+updateLoadingScopesFromData : Data -> LoadingScopes -> Result String LoadingScopes
 updateLoadingScopesFromData data { ledger, consensus, merceneries, marketing } =
     case data of
         Data.Constr _ [ owner1, owner2, owner3, owner4 ] ->
             case ( ( MultisigScript.fromData owner1, MultisigScript.fromData owner2 ), ( MultisigScript.fromData owner3, MultisigScript.fromData owner4 ) ) of
                 ( ( Just ms1, Just ms2 ), ( Just ms3, Just ms4 ) ) ->
-                    { ledger = { ledger | owner = Just ms1 }
-                    , consensus = { consensus | owner = Just ms2 }
-                    , merceneries = { merceneries | owner = Just ms3 }
-                    , marketing = { marketing | owner = Just ms4 }
-                    }
+                    Ok
+                        { ledger = { ledger | owner = Just ms1 }
+                        , consensus = { consensus | owner = Just ms2 }
+                        , merceneries = { merceneries | owner = Just ms3 }
+                        , marketing = { marketing | owner = Just ms4 }
+                        }
 
                 ( ( Nothing, _ ), _ ) ->
-                    scopesError "The first scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+                    Err "The first scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
 
                 ( ( _, Nothing ), _ ) ->
-                    scopesError "The second scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+                    Err "The second scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
 
                 ( _, ( Nothing, _ ) ) ->
-                    scopesError "The third scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+                    Err "The third scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
 
                 ( _, ( _, Nothing ) ) ->
-                    scopesError "The fourth scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
+                    Err "The fourth scope owner in the PRAGMA UTxO datum is not a valid aicone multisig"
 
         _ ->
-            scopesError "The PRAGMA UTxO does not contain exactly 4 owners"
+            Err "The PRAGMA UTxO does not contain exactly 4 owners"
 
 
 
@@ -744,30 +747,20 @@ viewOwner : Maybe MultisigScript -> Html msg
 viewOwner maybeOwner =
     case maybeOwner of
         Nothing ->
-            Html.p [] [ text <| "Unknow owner" ]
+            Html.p [] [ text <| "Owner: loading ..." ]
 
         Just owner ->
             Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
 
 
-viewPermissionsScript : Result String ( Bytes CredentialHash, PlutusScript ) -> Html msg
-viewPermissionsScript scriptResult =
-    case scriptResult of
-        Err error ->
-            Html.p [] [ text <| "Error while computing fully applied permissions script: " ++ error ]
-
-        Ok ( hash, _ ) ->
-            Html.p [] [ text <| "Fully applied plutus script hash: " ++ Bytes.toHex hash ]
+viewPermissionsScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
+viewPermissionsScript ( hash, _ ) =
+    Html.p [] [ text <| "Fully applied plutus script hash: " ++ Bytes.toHex hash ]
 
 
-viewRegistryNftPolicyId : Result String (Bytes PolicyId) -> Html msg
-viewRegistryNftPolicyId policyIdResult =
-    case policyIdResult of
-        Err error ->
-            Html.p [] [ text <| "Error while computing the policy ID of the registry trap: " ++ error ]
-
-        Ok policyId ->
-            Html.p [] [ text <| "Registry trap policy ID: " ++ Bytes.toHex policyId ]
+viewRegistryNftPolicyId : Bytes PolicyId -> Html msg
+viewRegistryNftPolicyId policyId =
+    Html.p [] [ text <| "Registry trap policy ID: " ++ Bytes.toHex policyId ]
 
 
 viewRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
