@@ -6,14 +6,13 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Data as Data exposing (Data)
-import Cardano.MultiAsset exposing (MultiAsset, PolicyId)
+import Cardano.MultiAsset as MultiAsset exposing (MultiAsset, PolicyId)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent as TxIntent exposing (TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
-import Cbor.Encode
 import ConcurrentTask exposing (ConcurrentTask)
 import Dict
 import Dict.Any
@@ -98,6 +97,7 @@ type Msg
 
 type TaskCompleted
     = LoadedPragmaUtxo ( OutputReference, Output )
+    | LoadedRegistryUtxos (Scopes ( OutputReference, Output ))
 
 
 
@@ -173,9 +173,9 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
                 registriesSeedUtxo
                 index
 
-        loadingTreasury ledger consensus merceneries marketing =
+        loadingTreasury ledger consensus mercenaries marketing =
             { rootUtxo = RemoteData.Loading
-            , scopes = Scopes ledger consensus merceneries marketing
+            , scopes = Scopes ledger consensus mercenaries marketing
             }
     in
     Result.map4 loadingTreasury
@@ -218,7 +218,7 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
             , sundaeTreasuryScriptApplied = RemoteData.Loading
             , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
             , registryUtxo = RemoteData.Loading
-            , scopeUtxos = RemoteData.Loading
+            , scopeUtxos = RemoteData.NotAsked
             }
     in
     Result.map2 loadingScope
@@ -235,7 +235,7 @@ type alias LoadedTreasury =
 type alias Scopes a =
     { ledger : a
     , consensus : a
-    , merceneries : a
+    , mercenaries : a
     , marketing : a
     }
 
@@ -248,13 +248,6 @@ type alias Scope =
 
     -- TODO: make sure they are updated after every Tx
     , utxos : Utxo.RefDict Output
-    }
-
-
-type alias LoadedUtxos =
-    { rootUtxo : ( OutputReference, Output )
-    , registryUtxos : Scopes ( OutputReference, Output )
-    , scopeUtxos : Scopes (List ( OutputReference, Output ))
     }
 
 
@@ -317,52 +310,78 @@ init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
                 model.scripts.registryTrap
                 model.registriesSeedUtxo
 
-        loadAllUtxos : Scopes LoadingScope -> ConcurrentTask String LoadedUtxos
-        loadAllUtxos loadingScopes =
+        loadRegistryUtxos : Scopes LoadingScope -> ConcurrentTask String (Scopes ( OutputReference, Output ))
+        loadRegistryUtxos loadingScopes =
             let
-                pragmaRootAsset =
-                    ( model.pragmaScriptHash, Bytes.fromText "amaru scopes" )
-
                 registryAssets =
                     Scopes
                         ( loadingScopes.ledger.registryNftPolicyId, Bytes.fromText "ledger" )
                         ( loadingScopes.consensus.registryNftPolicyId, Bytes.fromText "consensus" )
-                        ( loadingScopes.merceneries.registryNftPolicyId, Bytes.fromText "merceneries" )
+                        ( loadingScopes.mercenaries.registryNftPolicyId, Bytes.fromText "mercenaries" )
                         ( loadingScopes.marketing.registryNftPolicyId, Bytes.fromText "marketing" )
 
                 -- Query assets utxos
                 assetsUtxosTask : ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
                 assetsUtxosTask =
-                    Api.retrieveAssetsUtxos model.networkId
-                        [ pragmaRootAsset
-                        , registryAssets.ledger
+                    Api.retrieveAssetsUtxos { db = db }
+                        model.networkId
+                        [ registryAssets.ledger
                         , registryAssets.consensus
-                        , registryAssets.merceneries
+                        , registryAssets.mercenaries
                         , registryAssets.marketing
                         ]
 
-                -- TODO: Query scope utxos
-                --
-                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> LoadedUtxos
+                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> ConcurrentTask String (Scopes ( OutputReference, Output ))
                 extractLoadedUtxos assetsUtxos =
-                    Debug.todo ""
+                    Result.map4 Scopes
+                        (extractRegistryUtxo registryAssets.ledger assetsUtxos)
+                        (extractRegistryUtxo registryAssets.consensus assetsUtxos)
+                        (extractRegistryUtxo registryAssets.mercenaries assetsUtxos)
+                        (extractRegistryUtxo registryAssets.marketing assetsUtxos)
+                        |> ConcurrentTask.fromResult
+
+                extractRegistryUtxo ( policyId, assetName ) multiAsset =
+                    case MultiAsset.get policyId assetName multiAsset of
+                        Nothing ->
+                            Err <| "Missing asset: " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
+
+                        Just refDict ->
+                            case Dict.Any.toList refDict of
+                                [] ->
+                                    Err <| "Missing asset: " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
+
+                                [ utxo ] ->
+                                    Ok utxo
+
+                                _ ->
+                                    Err <| "Asset in more than 1 outputs! : " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
             in
-            ConcurrentTask.map extractLoadedUtxos assetsUtxosTask
+            ConcurrentTask.andThen extractLoadedUtxos assetsUtxosTask
+
+        attemptLoadRegistryUtxosTask loadingScopes =
+            loadRegistryUtxos loadingScopes
+                |> ConcurrentTask.map LoadedRegistryUtxos
+                |> ConcurrentTask.attempt
+                    { pool = updatedTaskPool
+                    , send = sendTask
+                    , onComplete = OnTaskComplete
+                    }
     in
     case ( blueprintError, loadingTreasuryResult ) of
         ( Nothing, Ok loadingTreasury ) ->
-            -- TODO: make requests to retrieve all relevant UTxOs:
-            --  - pragma root utxo
-            --  - all 4 registry utxos
-            --  - all scope utxos
+            let
+                ( updatedAgainTaskPool, loadRegistryUtxosCmd ) =
+                    attemptLoadRegistryUtxosTask loadingTreasury.scopes
+            in
             ( { model
-                | taskPool = updatedTaskPool
+                | taskPool = updatedAgainTaskPool
                 , treasuryManagement = TreasuryLoading loadingTreasury
               }
             , Cmd.batch
                 [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
                 , Api.loadProtocolParams model.networkId GotNetworkParams
                 , loadPragmaUtxoCmd
+                , loadRegistryUtxosCmd
                 ]
             )
 
@@ -605,7 +624,29 @@ handleCompletedTask model taskCompleted =
                     )
 
                 _ ->
-                    ( Debug.todo "", Cmd.none )
+                    ( model, Cmd.none )
+
+        LoadedRegistryUtxos registryUtxos ->
+            case model.treasuryManagement of
+                TreasuryLoading ({ scopes } as loadingTreasury) ->
+                    ( { model
+                        | treasuryManagement =
+                            TreasuryLoading { loadingTreasury | scopes = setRegistryUtxos registryUtxos scopes }
+                      }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+
+setRegistryUtxos : Scopes ( OutputReference, Output ) -> Scopes LoadingScope -> Scopes LoadingScope
+setRegistryUtxos registryUtxos { ledger, consensus, mercenaries, marketing } =
+    { ledger = { ledger | registryUtxo = RemoteData.Success registryUtxos.ledger }
+    , consensus = { consensus | registryUtxo = RemoteData.Success registryUtxos.consensus }
+    , mercenaries = { mercenaries | registryUtxo = RemoteData.Success registryUtxos.mercenaries }
+    , marketing = { marketing | registryUtxo = RemoteData.Success registryUtxos.marketing }
+    }
 
 
 {-| Extract the scopes owner config from the root pragma utxo.
@@ -638,7 +679,7 @@ setPragmaUtxo unappliedSundaeTreasuryScript ref output loading =
 
 
 updateLoadingScopesFromData : PlutusScript -> Data -> Scopes LoadingScope -> Result String (Scopes LoadingScope)
-updateLoadingScopesFromData unappliedSundaeTreasuryScript data { ledger, consensus, merceneries, marketing } =
+updateLoadingScopesFromData unappliedSundaeTreasuryScript data { ledger, consensus, mercenaries, marketing } =
     case data of
         Data.Constr _ [ owner1, owner2, owner3, owner4 ] ->
             case ( ( MultisigScript.fromData owner1, MultisigScript.fromData owner2 ), ( MultisigScript.fromData owner3, MultisigScript.fromData owner4 ) ) of
@@ -653,7 +694,7 @@ updateLoadingScopesFromData unappliedSundaeTreasuryScript data { ledger, consens
                     Ok
                         { ledger = updateOwner ledger ms1
                         , consensus = updateOwner consensus ms2
-                        , merceneries = updateOwner merceneries ms3
+                        , mercenaries = updateOwner mercenaries ms3
                         , marketing = updateOwner marketing ms4
                         }
 
@@ -683,7 +724,7 @@ applySundaeTreasuryScript unappliedScript scope =
         treasuryConfig =
             { registryToken = scope.registryNftPolicyId
             , permissions =
-                { reorganize = Debug.log "multisig" multisig
+                { reorganize = multisig
                 , sweep = multisig
                 , fund = MultisigScript.AnyOf []
                 , disburse = multisig
@@ -784,7 +825,7 @@ viewTreasurySection treasuryManagement =
                 , viewLoadingRootUtxo rootUtxo
                 , viewLoadingScope "ledger" scopes.ledger
                 , viewLoadingScope "consensus" scopes.consensus
-                , viewLoadingScope "merceneries" scopes.merceneries
+                , viewLoadingScope "mercenaries" scopes.mercenaries
                 , viewLoadingScope "marketing" scopes.marketing
                 ]
 
@@ -796,7 +837,7 @@ viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
 viewLoadingRootUtxo rootUtxo =
     case rootUtxo of
         RemoteData.NotAsked ->
-            Html.p [] [ text "PRAGMA root UTxO not asked" ]
+            Html.p [] [ text "PRAGMA root UTxO not asked yet" ]
 
         RemoteData.Loading ->
             Html.p [] [ text "PRAGMA root UTxO loading ..." ]
@@ -840,7 +881,7 @@ viewTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) ->
 viewTreasuryScript remoteData =
     case remoteData of
         RemoteData.NotAsked ->
-            Html.p [] [ text <| "Sundae treasury script not asked" ]
+            Html.p [] [ text <| "Sundae treasury script not asked yet" ]
 
         RemoteData.Loading ->
             Html.p [] [ text <| "Sundae treasury script loading ..." ]
@@ -861,7 +902,7 @@ viewRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
 viewRegistryUtxo registryUtxo =
     case registryUtxo of
         RemoteData.NotAsked ->
-            Html.p [] [ text <| "Registry UTxO not asked" ]
+            Html.p [] [ text <| "Registry UTxO not asked yet" ]
 
         RemoteData.Loading ->
             Html.p [] [ text <| "Registry UTxO loading ..." ]
@@ -869,15 +910,15 @@ viewRegistryUtxo registryUtxo =
         RemoteData.Failure error ->
             Html.p [] [ text <| "Registry UTxO failed to load: " ++ error ]
 
-        RemoteData.Success _ ->
-            Html.p [] [ text <| "Registry UTxO loaded" ]
+        RemoteData.Success ( ref, _ ) ->
+            Html.p [] [ text <| "Registry UTxO loaded: " ++ Debug.toString ref ]
 
 
 viewScopeUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
 viewScopeUtxos loadingUtxos =
     case loadingUtxos of
         RemoteData.NotAsked ->
-            Html.p [] [ text <| "Scope UTxOs not asked" ]
+            Html.p [] [ text <| "Scope UTxOs not asked yet" ]
 
         RemoteData.Loading ->
             Html.p [] [ text <| "Scope UTxOs loading ..." ]

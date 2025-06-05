@@ -1,10 +1,11 @@
 module Api exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
+import Bytes.Map exposing (BytesMap)
 import Cardano.Address exposing (NetworkId(..))
 import Cardano.Gov exposing (CostModels)
-import Cardano.MultiAsset exposing (AssetName, MultiAsset, PolicyId)
-import Cardano.Transaction as Transaction
+import Cardano.MultiAsset as MultiAsset exposing (AssetName, MultiAsset, PolicyId)
+import Cardano.Transaction as Tx exposing (Transaction)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId)
 import ConcurrentTask exposing (ConcurrentTask)
@@ -87,14 +88,88 @@ protocolParamsDecoder =
         (JD.at [ "result", "stakeCredentialDeposit", "ada", "lovelace" ] <| JD.map N.fromSafeInt JD.int)
 
 
+{-| Retrieve all UTxOs associated with the provided tokens
+-}
+retrieveAssetsUtxos : { db : JD.Value } -> NetworkId -> List ( Bytes PolicyId, Bytes AssetName ) -> ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
+retrieveAssetsUtxos db networkId assets =
+    let
+        encodeAsset ( id, name ) =
+            JE.list identity
+                [ JE.string <| Bytes.toHex id
+                , JE.string <| Bytes.toHex name
+                ]
 
--- Retrieve all UTxOs associated with the provided tokens
--- TODO: return -> MultiAsset (Utxo.RefDict Output)
+        extractMultiAsset : List ( OutputReference, Output ) -> MultiAsset (Utxo.RefDict Output)
+        extractMultiAsset utxos =
+            List.foldl extractAssets MultiAsset.empty utxos
+                |> MultiAsset.map Utxo.refDictFromList
+
+        extractAssets : ( OutputReference, Output ) -> MultiAsset (List ( OutputReference, Output )) -> MultiAsset (List ( OutputReference, Output ))
+        extractAssets ( ref, output ) accum =
+            let
+                insertUtxoIfAssetPresent ( id, name ) assetUtxos =
+                    case MultiAsset.get id name output.amount.assets of
+                        Nothing ->
+                            let
+                                _ =
+                                    Debug.log (Bytes.toHex id ++ " / " ++ Bytes.pretty name) <|
+                                        "NOT found in "
+                                            ++ Utxo.refAsString ref
+                            in
+                            assetUtxos
+
+                        Just _ ->
+                            let
+                                _ =
+                                    Debug.log (Bytes.toHex id ++ " / " ++ Bytes.pretty name) <|
+                                        "found in "
+                                            ++ Utxo.refAsString ref
+                            in
+                            -- Insert (ref, output) into assetUtxos[id][name]
+                            MultiAsset.get id name assetUtxos
+                                |> Maybe.withDefault []
+                                |> (::) ( ref, output )
+                                |> (\updatedUtxos -> MultiAsset.set id name updatedUtxos assetUtxos)
+            in
+            List.foldl insertUtxoIfAssetPresent accum assets
+    in
+    ConcurrentTask.Http.post
+        { url = koiosUrl networkId ++ "/asset_utxos"
+        , headers = [ ConcurrentTask.Http.header "Authorization" <| "Bearer " ++ koiosApiToken ]
+        , body =
+            ConcurrentTask.Http.jsonBody <|
+                JE.object [ ( "_asset_list", JE.list encodeAsset assets ) ]
+        , expect = ConcurrentTask.Http.expectJson koiosLiveUtxosDecoder
+        , timeout = Nothing
+        }
+        |> ConcurrentTask.mapError Debug.toString
+        -- List OutputReference
+        |> ConcurrentTask.andThen (retrieveUtxos db networkId)
+        -- List (OutputReference, Output)
+        |> ConcurrentTask.map extractMultiAsset
 
 
-retrieveAssetsUtxos : NetworkId -> List ( Bytes PolicyId, Bytes AssetName ) -> ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
-retrieveAssetsUtxos networkId assets =
-    Debug.todo ""
+koiosLiveUtxosDecoder : Decoder (List OutputReference)
+koiosLiveUtxosDecoder =
+    JD.list koiosUtxoRefDecoder
+        |> JD.map
+            (List.filterMap
+                (\{ txId, index, isSpent } ->
+                    if isSpent then
+                        Nothing
+
+                    else
+                        Just <| OutputReference txId index
+                )
+            )
+
+
+koiosUtxoRefDecoder : Decoder { txId : Bytes TransactionId, index : Int, isSpent : Bool }
+koiosUtxoRefDecoder =
+    JD.map3 (\txId index isSpent -> { txId = txId, index = index, isSpent = isSpent })
+        (JD.field "tx_hash" Bytes.jsonDecoder)
+        (JD.field "tx_index" JD.int)
+        (JD.field "is_spent" JD.bool)
 
 
 
@@ -125,17 +200,7 @@ retrieveAssetUtxo networkId policyId assetName =
 
 koiosLiveUtxoDecoder : Decoder OutputReference
 koiosLiveUtxoDecoder =
-    JD.list koiosUtxoRefDecoder
-        |> JD.map
-            (List.filterMap
-                (\{ txId, index, isSpent } ->
-                    if isSpent then
-                        Nothing
-
-                    else
-                        Just <| OutputReference txId index
-                )
-            )
+    koiosLiveUtxosDecoder
         |> JD.andThen
             (\refs ->
                 case refs of
@@ -150,16 +215,44 @@ koiosLiveUtxoDecoder =
             )
 
 
-koiosUtxoRefDecoder : Decoder { txId : Bytes TransactionId, index : Int, isSpent : Bool }
-koiosUtxoRefDecoder =
-    JD.map3 (\txId index isSpent -> { txId = txId, index = index, isSpent = isSpent })
-        (JD.field "tx_hash" Bytes.jsonDecoder)
-        (JD.field "tx_index" JD.int)
-        (JD.field "is_spent" JD.bool)
+
+-- Retrieve Output(s) from the OutputReference(s)
 
 
+retrieveUtxos : { db : JD.Value } -> NetworkId -> List OutputReference -> ConcurrentTask String (List ( OutputReference, Output ))
+retrieveUtxos db networkId refs =
+    let
+        extractUtxos : List { txId : Bytes TransactionId, txCbor : Bytes a } -> Result String (List ( OutputReference, Output ))
+        extractUtxos txs =
+            let
+                txMap : BytesMap TransactionId (Maybe Transaction)
+                txMap =
+                    List.map (\{ txId, txCbor } -> ( txId, Tx.deserialize txCbor )) txs
+                        |> Bytes.Map.fromList
 
--- Retrieve Output from the OutputReference
+                extractOutput : OutputReference -> Result String ( OutputReference, Output )
+                extractOutput ref =
+                    case Bytes.Map.get ref.transactionId txMap of
+                        Nothing ->
+                            Err <| "Missing UTxO: " ++ Utxo.refAsString ref
+
+                        Just Nothing ->
+                            Err <| "Failed to decode Tx with ID: " ++ Bytes.toHex ref.transactionId
+
+                        Just (Just tx) ->
+                            case List.Extra.getAt ref.outputIndex tx.body.outputs of
+                                Nothing ->
+                                    Err <| "Missing output in Tx: " ++ Utxo.refAsString ref
+
+                                Just output ->
+                                    Ok ( ref, output )
+            in
+            List.map extractOutput refs
+                |> Result.Extra.combine
+    in
+    List.map (\ref -> ref.transactionId) refs
+        |> retrieveAllTxsBytesWithCache db networkId
+        |> ConcurrentTask.andThen (ConcurrentTask.fromResult << extractUtxos)
 
 
 retrieveOutput : NetworkId -> OutputReference -> ConcurrentTask String ( OutputReference, Output )
@@ -168,7 +261,7 @@ retrieveOutput networkId utxo =
         |> ConcurrentTask.mapError Debug.toString
         |> ConcurrentTask.andThen
             (\txBytes ->
-                case Transaction.deserialize txBytes of
+                case Tx.deserialize txBytes of
                     Nothing ->
                         ConcurrentTask.fail <| "Failed to deserialize the Tx bytes: " ++ Bytes.toHex txBytes
 
