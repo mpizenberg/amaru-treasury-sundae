@@ -110,17 +110,10 @@ retrieveAssetUtxo networkId policyId assetName =
 
 koiosLiveUtxoDecoder : Decoder OutputReference
 koiosLiveUtxoDecoder =
-    let
-        itemDecoder =
-            JD.map3 (\txId index isSpent -> ( txId, index, isSpent ))
-                (JD.field "tx_hash" Bytes.jsonDecoder)
-                (JD.field "tx_index" JD.int)
-                (JD.field "is_spent" JD.bool)
-    in
-    JD.list itemDecoder
+    JD.list koiosUtxoRefDecoder
         |> JD.map
             (List.filterMap
-                (\( txId, index, isSpent ) ->
+                (\{ txId, index, isSpent } ->
                     if isSpent then
                         Nothing
 
@@ -140,6 +133,14 @@ koiosLiveUtxoDecoder =
                     _ ->
                         JD.fail "The server unexpectedly returned more than 1 UTxO."
             )
+
+
+koiosUtxoRefDecoder : Decoder { txId : Bytes TransactionId, index : Int, isSpent : Bool }
+koiosUtxoRefDecoder =
+    JD.map3 (\txId index isSpent -> { txId = txId, index = index, isSpent = isSpent })
+        (JD.field "tx_hash" Bytes.jsonDecoder)
+        (JD.field "tx_index" JD.int)
+        (JD.field "is_spent" JD.bool)
 
 
 
