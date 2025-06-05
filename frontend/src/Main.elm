@@ -6,14 +6,15 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Data as Data exposing (Data)
-import Cardano.MultiAsset exposing (PolicyId)
+import Cardano.MultiAsset exposing (MultiAsset, PolicyId)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.TxIntent as TxIntent exposing (TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
-import ConcurrentTask
+import Cbor.Encode
+import ConcurrentTask exposing (ConcurrentTask)
 import Dict
 import Dict.Any
 import Html exposing (Html, div, text)
@@ -28,6 +29,7 @@ import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
 import Treasury exposing (SpendConfig)
+import Types
 
 
 type alias Flags =
@@ -156,15 +158,7 @@ type TreasuryManagement
 
 type alias LoadingTreasury =
     { rootUtxo : RemoteData String ( OutputReference, Output )
-    , scopes : LoadingScopes
-    }
-
-
-type alias LoadingScopes =
-    { ledger : LoadingScope
-    , consensus : LoadingScope
-    , merceneries : LoadingScope
-    , marketing : LoadingScope
+    , scopes : Scopes LoadingScope
     }
 
 
@@ -181,7 +175,7 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
 
         loadingTreasury ledger consensus merceneries marketing =
             { rootUtxo = RemoteData.Loading
-            , scopes = LoadingScopes ledger consensus merceneries marketing
+            , scopes = Scopes ledger consensus merceneries marketing
             }
     in
     Result.map4 loadingTreasury
@@ -194,6 +188,7 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
 type alias LoadingScope =
     { owner : Maybe MultisigScript
     , permissionsScriptApplied : ( Bytes CredentialHash, PlutusScript )
+    , sundaeTreasuryScriptApplied : RemoteData String ( Bytes CredentialHash, PlutusScript )
     , registryNftPolicyId : Bytes PolicyId
     , registryUtxo : RemoteData String ( OutputReference, Output )
     , scopeUtxos : RemoteData String (Utxo.RefDict Output)
@@ -220,25 +215,28 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
         loadingScope permissionsScript registryScript =
             { owner = Nothing
             , permissionsScriptApplied = ( Script.hash <| Script.Plutus permissionsScript, permissionsScript )
+            , sundaeTreasuryScriptApplied = RemoteData.Loading
             , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
             , registryUtxo = RemoteData.Loading
             , scopeUtxos = RemoteData.Loading
             }
     in
-    Result.map2 loadingScope permissionsScriptResult registryScriptResult
+    Result.map2 loadingScope
+        permissionsScriptResult
+        registryScriptResult
 
 
 type alias LoadedTreasury =
     { rootUtxo : ( OutputReference, Output )
-    , scopes : Scopes
+    , scopes : Scopes Scope
     }
 
 
-type alias Scopes =
-    { ledger : Scope
-    , consensus : Scope
-    , merceneries : Scope
-    , marketing : Scope
+type alias Scopes a =
+    { ledger : a
+    , consensus : a
+    , merceneries : a
+    , marketing : a
     }
 
 
@@ -250,6 +248,13 @@ type alias Scope =
 
     -- TODO: make sure they are updated after every Tx
     , utxos : Utxo.RefDict Output
+    }
+
+
+type alias LoadedUtxos =
+    { rootUtxo : ( OutputReference, Output )
+    , registryUtxos : Scopes ( OutputReference, Output )
+    , scopeUtxos : Scopes (List ( OutputReference, Output ))
     }
 
 
@@ -311,9 +316,45 @@ init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
                 model.pragmaScriptHash
                 model.scripts.registryTrap
                 model.registriesSeedUtxo
+
+        loadAllUtxos : Scopes LoadingScope -> ConcurrentTask String LoadedUtxos
+        loadAllUtxos loadingScopes =
+            let
+                pragmaRootAsset =
+                    ( model.pragmaScriptHash, Bytes.fromText "amaru scopes" )
+
+                registryAssets =
+                    Scopes
+                        ( loadingScopes.ledger.registryNftPolicyId, Bytes.fromText "ledger" )
+                        ( loadingScopes.consensus.registryNftPolicyId, Bytes.fromText "consensus" )
+                        ( loadingScopes.merceneries.registryNftPolicyId, Bytes.fromText "merceneries" )
+                        ( loadingScopes.marketing.registryNftPolicyId, Bytes.fromText "marketing" )
+
+                -- Query assets utxos
+                assetsUtxosTask : ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
+                assetsUtxosTask =
+                    Api.retrieveAssetsUtxos model.networkId
+                        [ pragmaRootAsset
+                        , registryAssets.ledger
+                        , registryAssets.consensus
+                        , registryAssets.merceneries
+                        , registryAssets.marketing
+                        ]
+
+                -- TODO: Query scope utxos
+                --
+                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> LoadedUtxos
+                extractLoadedUtxos assetsUtxos =
+                    Debug.todo ""
+            in
+            ConcurrentTask.map extractLoadedUtxos assetsUtxosTask
     in
     case ( blueprintError, loadingTreasuryResult ) of
         ( Nothing, Ok loadingTreasury ) ->
+            -- TODO: make requests to retrieve all relevant UTxOs:
+            --  - pragma root utxo
+            --  - all 4 registry utxos
+            --  - all scope utxos
             ( { model
                 | taskPool = updatedTaskPool
                 , treasuryManagement = TreasuryLoading loadingTreasury
@@ -555,12 +596,11 @@ handleCompletedTask model taskCompleted =
         LoadedPragmaUtxo ( ref, output ) ->
             case model.treasuryManagement of
                 TreasuryLoading loadingTreasury ->
-                    ( setPragmaUtxo ref output loadingTreasury
+                    ( setPragmaUtxo model.scripts.sundaeTreasury ref output loadingTreasury
                         |> Result.map (\treasuryManagement -> { model | treasuryManagement = treasuryManagement })
                         |> Result.Extra.extract (\error -> { model | error = Just error })
-                      -- TODO: task to retrieve the registry UTxOs (outputs in the same Tx)
                       -- TODO: task to retrieve the scope UTxOs
-                      -- TODO: probably all utxo retrieving can be done in a single Koios request!
+                      -- now that we have the applied sundae treasury scripts for each scope
                     , Cmd.none
                     )
 
@@ -568,8 +608,11 @@ handleCompletedTask model taskCompleted =
                     ( Debug.todo "", Cmd.none )
 
 
-setPragmaUtxo : OutputReference -> Output -> LoadingTreasury -> Result String TreasuryManagement
-setPragmaUtxo ref output loading =
+{-| Extract the scopes owner config from the root pragma utxo.
+Also apply the Sundae treasuy contracts with the now known paramaters.
+-}
+setPragmaUtxo : PlutusScript -> OutputReference -> Output -> LoadingTreasury -> Result String TreasuryManagement
+setPragmaUtxo unappliedSundaeTreasuryScript ref output loading =
     let
         scopes =
             case output.datumOption of
@@ -579,7 +622,7 @@ setPragmaUtxo ref output loading =
                             Err "The PRAGMA UTxO datum does not contain valid Data."
 
                         Just data ->
-                            updateLoadingScopesFromData data loading.scopes
+                            updateLoadingScopesFromData unappliedSundaeTreasuryScript data loading.scopes
 
                 _ ->
                     Err "The PRAGMA UTxO does not contain a valid datum"
@@ -594,17 +637,24 @@ setPragmaUtxo ref output loading =
     Result.map treasuryLoading scopes
 
 
-updateLoadingScopesFromData : Data -> LoadingScopes -> Result String LoadingScopes
-updateLoadingScopesFromData data { ledger, consensus, merceneries, marketing } =
+updateLoadingScopesFromData : PlutusScript -> Data -> Scopes LoadingScope -> Result String (Scopes LoadingScope)
+updateLoadingScopesFromData unappliedSundaeTreasuryScript data { ledger, consensus, merceneries, marketing } =
     case data of
         Data.Constr _ [ owner1, owner2, owner3, owner4 ] ->
             case ( ( MultisigScript.fromData owner1, MultisigScript.fromData owner2 ), ( MultisigScript.fromData owner3, MultisigScript.fromData owner4 ) ) of
                 ( ( Just ms1, Just ms2 ), ( Just ms3, Just ms4 ) ) ->
+                    let
+                        updateOwner scope owner =
+                            { scope
+                                | owner = Just owner
+                                , sundaeTreasuryScriptApplied = applySundaeTreasuryScript unappliedSundaeTreasuryScript scope
+                            }
+                    in
                     Ok
-                        { ledger = { ledger | owner = Just ms1 }
-                        , consensus = { consensus | owner = Just ms2 }
-                        , merceneries = { merceneries | owner = Just ms3 }
-                        , marketing = { marketing | owner = Just ms4 }
+                        { ledger = updateOwner ledger ms1
+                        , consensus = updateOwner consensus ms2
+                        , merceneries = updateOwner merceneries ms3
+                        , marketing = updateOwner marketing ms4
                         }
 
                 ( ( Nothing, _ ), _ ) ->
@@ -621,6 +671,33 @@ updateLoadingScopesFromData data { ledger, consensus, merceneries, marketing } =
 
         _ ->
             Err "The PRAGMA UTxO does not contain exactly 4 owners"
+
+
+applySundaeTreasuryScript : PlutusScript -> LoadingScope -> RemoteData String ( Bytes CredentialHash, PlutusScript )
+applySundaeTreasuryScript unappliedScript scope =
+    let
+        multisig =
+            MultisigScript.Script (Tuple.first scope.permissionsScriptApplied)
+
+        treasuryConfig : Types.TreasuryConfiguration
+        treasuryConfig =
+            { registryToken = scope.registryNftPolicyId
+            , permissions =
+                { reorganize = Debug.log "multisig" multisig
+                , sweep = multisig
+                , fund = MultisigScript.AnyOf []
+                , disburse = multisig
+                , unregister = multisig
+                }
+
+            -- TODO: retrieve expiration from aiken build outputs
+            , expiration = N.fromSafeInt 1767182399000
+            , payoutUpperbound = N.zero
+            }
+    in
+    Uplc.applyParamsToScript [ Types.treasuryConfigToData treasuryConfig ] unappliedScript
+        |> Result.Extra.unpack RemoteData.Failure
+            (\applied -> RemoteData.Success ( Script.hash <| Script.Plutus applied, applied ))
 
 
 
@@ -732,11 +809,12 @@ viewLoadingRootUtxo rootUtxo =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, permissionsScriptApplied, registryNftPolicyId, registryUtxo, scopeUtxos } =
+viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, registryNftPolicyId, registryUtxo, scopeUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
         , viewPermissionsScript permissionsScriptApplied
+        , viewTreasuryScript sundaeTreasuryScriptApplied
         , viewRegistryNftPolicyId registryNftPolicyId
         , viewRegistryUtxo registryUtxo
         , viewScopeUtxos scopeUtxos
@@ -755,7 +833,23 @@ viewOwner maybeOwner =
 
 viewPermissionsScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
 viewPermissionsScript ( hash, _ ) =
-    Html.p [] [ text <| "Fully applied plutus script hash: " ++ Bytes.toHex hash ]
+    Html.p [] [ text <| "Fully applied permissions script hash: " ++ Bytes.toHex hash ]
+
+
+viewTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) -> Html msg
+viewTreasuryScript remoteData =
+    case remoteData of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Sundae treasury script not asked" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Sundae treasury script loading ..." ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Sundae treasury script failed to load: " ++ error ]
+
+        RemoteData.Success ( hash, _ ) ->
+            Html.p [] [ text <| "Fully applied Sundae treasury script hash: " ++ Bytes.toHex hash ]
 
 
 viewRegistryNftPolicyId : Bytes PolicyId -> Html msg

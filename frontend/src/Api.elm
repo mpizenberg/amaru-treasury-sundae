@@ -3,17 +3,20 @@ module Api exposing (..)
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (NetworkId(..))
 import Cardano.Gov exposing (CostModels)
-import Cardano.MultiAsset exposing (AssetName, PolicyId)
+import Cardano.MultiAsset exposing (AssetName, MultiAsset, PolicyId)
 import Cardano.Transaction as Transaction
 import Cardano.Uplc as Uplc
-import Cardano.Utxo exposing (Output, OutputReference, TransactionId)
+import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId)
 import ConcurrentTask exposing (ConcurrentTask)
+import ConcurrentTask.Extra
 import ConcurrentTask.Http
 import Http
 import Json.Decode as JD exposing (Decoder)
 import Json.Encode as JE
 import List.Extra
 import Natural as N exposing (Natural)
+import Result.Extra
+import Storage
 
 
 {-| Free Tier Koios API token.
@@ -85,6 +88,18 @@ protocolParamsDecoder =
 
 
 
+-- Retrieve all UTxOs associated with the provided tokens
+-- TODO: return -> MultiAsset (Utxo.RefDict Output)
+
+
+retrieveAssetsUtxos : NetworkId -> List ( Bytes PolicyId, Bytes AssetName ) -> ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
+retrieveAssetsUtxos networkId assets =
+    Debug.todo ""
+
+
+
+--
+--
 -- Retrieve NFT UTxO
 
 
@@ -166,11 +181,78 @@ retrieveOutput networkId utxo =
 
 
 
--- Retrieve Tx
+-- Retrieve Txs
+
+
+{-| Task to retrieve the raw CBOR of multiple Txs with a single request.
+For Txs already retrieved, load them from the cache.
+-}
+retrieveAllTxsBytesWithCache : { db : JD.Value } -> NetworkId -> List (Bytes TransactionId) -> ConcurrentTask String (List { txId : Bytes TransactionId, txCbor : Bytes a })
+retrieveAllTxsBytesWithCache db networkId txIds =
+    let
+        loadTxsFromCache : ConcurrentTask x { success : List { txId : Bytes TransactionId, txCbor : Bytes a }, notFoundInCache : List (Bytes TransactionId) }
+        loadTxsFromCache =
+            List.map (loadTxCborFromCache db) txIds
+                |> ConcurrentTask.Extra.parallel
+                |> ConcurrentTask.map splitNotFoundInCache
+
+        splitNotFoundInCache : List (Result x (Bytes a)) -> { success : List { txId : Bytes TransactionId, txCbor : Bytes a }, notFoundInCache : List (Bytes TransactionId) }
+        splitNotFoundInCache results =
+            let
+                pairs : List (Result (Bytes TransactionId) { txId : Bytes TransactionId, txCbor : Bytes a })
+                pairs =
+                    List.map2
+                        (\id cborResult ->
+                            Result.Extra.mapBoth
+                                (\_ -> id)
+                                (\cbor -> { txId = id, txCbor = cbor })
+                                cborResult
+                        )
+                        txIds
+                        results
+
+                ( success, notFoundInCache ) =
+                    Result.Extra.partition pairs
+            in
+            { success = success, notFoundInCache = notFoundInCache }
+
+        writeTxsToCache : List { txId : Bytes TransactionId, txCbor : Bytes a } -> ConcurrentTask x ()
+        writeTxsToCache txs =
+            List.map (\{ txId, txCbor } -> writeTxCborToCache db txId txCbor) txs
+                |> ConcurrentTask.batch
+                |> ConcurrentTask.map (always ())
+    in
+    loadTxsFromCache
+        |> ConcurrentTask.andThen
+            (\{ success, notFoundInCache } ->
+                -- Make a request for all not found
+                -- and aggregate with those from cache
+                retrieveAllTxsBytes networkId notFoundInCache
+                    |> ConcurrentTask.mapError Debug.toString
+                    |> ConcurrentTask.andThen
+                        (\txs ->
+                            writeTxsToCache txs
+                                |> ConcurrentTask.andThenDo (ConcurrentTask.succeed <| success ++ txs)
+                        )
+            )
+
+
+{-| Task to retrieve the raw CBOR of multiple Txs with a single request.
+-}
+retrieveAllTxsBytes : NetworkId -> List (Bytes TransactionId) -> ConcurrentTask ConcurrentTask.Http.Error (List { txId : Bytes TransactionId, txCbor : Bytes a })
+retrieveAllTxsBytes networkId txIds =
+    ConcurrentTask.Http.post
+        { url = koiosUrl networkId ++ "/tx_cbor"
+        , headers = [ ConcurrentTask.Http.header "Authorization" <| "Bearer " ++ koiosApiToken ]
+        , body =
+            ConcurrentTask.Http.jsonBody <|
+                JE.object [ ( "_tx_hashes", JE.list (JE.string << Bytes.toHex) txIds ) ]
+        , expect = ConcurrentTask.Http.expectJson (JD.list oneTxBytesDecoder)
+        , timeout = Nothing
+        }
 
 
 {-| Task to retrieve the raw CBOR of a given Tx.
-It uses the Koios API, proxied through the app server (because CORS).
 -}
 retrieveTxBytes : NetworkId -> Bytes TransactionId -> ConcurrentTask ConcurrentTask.Http.Error (Bytes a)
 retrieveTxBytes networkId txId =
@@ -200,12 +282,6 @@ retrieveTxBytes networkId txId =
 
 koiosFirstTxBytesDecoder : Decoder { txId : Bytes TransactionId, txCbor : Bytes a }
 koiosFirstTxBytesDecoder =
-    let
-        oneTxBytesDecoder =
-            JD.map2 (\txId cbor -> { txId = txId, txCbor = cbor })
-                (JD.field "tx_hash" Bytes.jsonDecoder)
-                (JD.field "cbor" Bytes.jsonDecoder)
-    in
     JD.list oneTxBytesDecoder
         |> JD.andThen
             (\txs ->
@@ -219,3 +295,24 @@ koiosFirstTxBytesDecoder =
                     _ ->
                         JD.fail "The server unexpectedly returned more than 1 transaction."
             )
+
+
+oneTxBytesDecoder : Decoder { txId : Bytes TransactionId, txCbor : Bytes a }
+oneTxBytesDecoder =
+    JD.map2 (\txId cbor -> { txId = txId, txCbor = cbor })
+        (JD.field "tx_hash" Bytes.jsonDecoder)
+        (JD.field "cbor" Bytes.jsonDecoder)
+
+
+
+-- Cache Tx
+
+
+loadTxCborFromCache : { db : JD.Value } -> Bytes TransactionId -> ConcurrentTask String (Bytes cbor)
+loadTxCborFromCache { db } txId =
+    Storage.read { db = db, storeName = "tx" } Bytes.jsonDecoder { key = Bytes.toHex txId }
+
+
+writeTxCborToCache : { db : JD.Value } -> Bytes TransactionId -> Bytes cbor -> ConcurrentTask x ()
+writeTxCborToCache { db } txId txCbor =
+    Storage.write { db = db, storeName = "tx" } Bytes.jsonEncode { key = Bytes.toHex txId } txCbor
