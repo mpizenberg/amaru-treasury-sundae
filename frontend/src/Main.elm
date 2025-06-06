@@ -900,7 +900,7 @@ viewTreasurySection treasuryManagement =
 
         TreasuryLoading { rootUtxo, scopes } ->
             div []
-                [ Html.p [] [ text "Loading treasury ..." ]
+                [ Html.p [] [ text "Loading treasury ... ", spinner ]
                 , viewLoadingRootUtxo rootUtxo
                 , viewLoadingScope "ledger" scopes.ledger
                 , viewLoadingScope "consensus" scopes.consensus
@@ -919,7 +919,7 @@ viewLoadingRootUtxo rootUtxo =
             Html.p [] [ text "PRAGMA root UTxO not asked yet" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text "PRAGMA root UTxO loading ..." ]
+            Html.p [] [ text "PRAGMA root UTxO loading ... ", spinner ]
 
         RemoteData.Failure error ->
             Html.p [] [ text <| "PRAGMA root UTxO failed to load: " ++ error ]
@@ -945,7 +945,7 @@ viewOwner : Maybe MultisigScript -> Html msg
 viewOwner maybeOwner =
     case maybeOwner of
         Nothing ->
-            Html.p [] [ text <| "Owner: loading ..." ]
+            Html.p [] [ text <| "Owner: loading ... ", spinner ]
 
         Just owner ->
             Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
@@ -963,7 +963,7 @@ viewTreasuryScript remoteData =
             Html.p [] [ text <| "Sundae treasury script not asked yet" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text <| "Sundae treasury script loading ..." ]
+            Html.p [] [ text <| "Sundae treasury script loading ... ", spinner ]
 
         RemoteData.Failure error ->
             Html.p [] [ text <| "Sundae treasury script failed to load: " ++ error ]
@@ -984,7 +984,7 @@ viewRegistryUtxo registryUtxo =
             Html.p [] [ text <| "Registry UTxO not asked yet" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text <| "Registry UTxO loading ..." ]
+            Html.p [] [ text <| "Registry UTxO loading ... ", spinner ]
 
         RemoteData.Failure error ->
             Html.p [] [ text <| "Registry UTxO failed to load: " ++ error ]
@@ -1000,10 +1000,15 @@ viewTreasuryUtxos loadingUtxos =
             Html.p [] [ text <| "Scope UTxOs not asked yet" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text <| "Scope UTxOs loading ..." ]
+            Html.p [] [ text <| "Scope UTxOs loading ... ", spinner ]
 
         RemoteData.Failure error ->
             Html.p [] [ text <| "Scope UTxOs failed to load: " ++ error ]
 
         RemoteData.Success utxos ->
             Html.p [] [ text <| "Scope UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
+
+
+spinner : Html msg
+spinner =
+    Html.span [ HA.class "loader" ] []
