@@ -3,6 +3,7 @@ port module Main exposing (main)
 import Api exposing (ProtocolParams)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
+import Bytes.Map exposing (BytesMap)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Data as Data exposing (Data)
@@ -98,6 +99,7 @@ type Msg
 type TaskCompleted
     = LoadedPragmaUtxo ( OutputReference, Output )
     | LoadedRegistryUtxos (Scopes ( OutputReference, Output ))
+    | LoadedTreasuriesUtxos (Scopes (Utxo.RefDict Output))
 
 
 
@@ -191,7 +193,7 @@ type alias LoadingScope =
     , sundaeTreasuryScriptApplied : RemoteData String ( Bytes CredentialHash, PlutusScript )
     , registryNftPolicyId : Bytes PolicyId
     , registryUtxo : RemoteData String ( OutputReference, Output )
-    , scopeUtxos : RemoteData String (Utxo.RefDict Output)
+    , treasuryUtxos : RemoteData String (Utxo.RefDict Output)
     }
 
 
@@ -218,7 +220,7 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
             , sundaeTreasuryScriptApplied = RemoteData.Loading
             , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
             , registryUtxo = RemoteData.Loading
-            , scopeUtxos = RemoteData.NotAsked
+            , treasuryUtxos = RemoteData.NotAsked
             }
     in
     Result.map2 loadingScope
@@ -474,6 +476,7 @@ handleWalletMsg value model =
             , Cmd.none
             )
 
+        -- TODO: handle the error case
         _ ->
             ( model, Cmd.none )
 
@@ -615,13 +618,63 @@ handleCompletedTask model taskCompleted =
         LoadedPragmaUtxo ( ref, output ) ->
             case model.treasuryManagement of
                 TreasuryLoading loadingTreasury ->
-                    ( setPragmaUtxo model.scripts.sundaeTreasury ref output loadingTreasury
-                        |> Result.map (\treasuryManagement -> { model | treasuryManagement = treasuryManagement })
-                        |> Result.Extra.extract (\error -> { model | error = Just error })
-                      -- TODO: task to retrieve the scope UTxOs
-                      -- now that we have the applied sundae treasury scripts for each scope
-                    , Cmd.none
-                    )
+                    case setPragmaUtxo model.scripts.sundaeTreasury ref output loadingTreasury of
+                        Ok treasuryManagement ->
+                            -- Also create a task to retrieve the scopes treasuries UTxOs
+                            -- now that we have the applied sundae treasury scripts for each scope
+                            let
+                                allTreasuriesUtxosTask : ConcurrentTask String (BytesMap CredentialHash (Utxo.RefDict Output))
+                                allTreasuriesUtxosTask =
+                                    -- The list order is the same as the order of the scopes
+                                    Api.retrieveUtxosWithPaymentCreds { db = model.db } model.networkId allTreasuriesScriptHashes
+
+                                allTreasuriesScriptHashes =
+                                    List.filterMap extractAppliedTreasuryScriptHash loadingScopes
+
+                                loadingScopes =
+                                    case treasuryManagement of
+                                        TreasuryLoading { scopes } ->
+                                            -- The list order is the same as the order of the scopes
+                                            [ scopes.ledger, scopes.consensus, scopes.mercenaries, scopes.marketing ]
+
+                                        _ ->
+                                            []
+
+                                extractAppliedTreasuryScriptHash { sundaeTreasuryScriptApplied } =
+                                    RemoteData.map (\( hash, _ ) -> hash) sundaeTreasuryScriptApplied
+                                        |> RemoteData.toMaybe
+
+                                ( updatedTaskPool, loadScopeUtxosCmd ) =
+                                    allTreasuriesUtxosTask
+                                        |> ConcurrentTask.map bytesMapToList
+                                        |> ConcurrentTask.andThen listToScopes
+                                        |> ConcurrentTask.map LoadedTreasuriesUtxos
+                                        |> ConcurrentTask.attempt
+                                            { pool = model.taskPool
+                                            , send = sendTask
+                                            , onComplete = OnTaskComplete
+                                            }
+
+                                bytesMapToList bytesMap =
+                                    List.filterMap (\hash -> Bytes.Map.get hash bytesMap) allTreasuriesScriptHashes
+
+                                listToScopes utxosInList =
+                                    case utxosInList of
+                                        [ ledgerUtxos, consensusUtxos, mercenariesUtxos, marketingUtxos ] ->
+                                            ConcurrentTask.succeed (Scopes ledgerUtxos consensusUtxos mercenariesUtxos marketingUtxos)
+
+                                        _ ->
+                                            ConcurrentTask.fail "Something unexpected happened while trying to retrieve scopes treasuries UTxOs"
+                            in
+                            ( { model
+                                | treasuryManagement = treasuryManagement
+                                , taskPool = updatedTaskPool
+                              }
+                            , loadScopeUtxosCmd
+                            )
+
+                        Err error ->
+                            ( { model | error = Just error }, Cmd.none )
 
                 _ ->
                     ( model, Cmd.none )
@@ -629,9 +682,26 @@ handleCompletedTask model taskCompleted =
         LoadedRegistryUtxos registryUtxos ->
             case model.treasuryManagement of
                 TreasuryLoading ({ scopes } as loadingTreasury) ->
+                    -- TODO: if all UTxOs have been loaded (registry and scope)
+                    -- then we can convert into a LoadedTreasury
                     ( { model
                         | treasuryManagement =
                             TreasuryLoading { loadingTreasury | scopes = setRegistryUtxos registryUtxos scopes }
+                      }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        LoadedTreasuriesUtxos treasuriesUtxos ->
+            case model.treasuryManagement of
+                TreasuryLoading ({ scopes } as loadingTreasury) ->
+                    -- TODO: if all UTxOs have been loaded (registry and scope)
+                    -- then we can convert into a LoadedTreasury
+                    ( { model
+                        | treasuryManagement =
+                            TreasuryLoading { loadingTreasury | scopes = setTreasuryUtxos treasuriesUtxos scopes }
                       }
                     , Cmd.none
                     )
@@ -646,6 +716,15 @@ setRegistryUtxos registryUtxos { ledger, consensus, mercenaries, marketing } =
     , consensus = { consensus | registryUtxo = RemoteData.Success registryUtxos.consensus }
     , mercenaries = { mercenaries | registryUtxo = RemoteData.Success registryUtxos.mercenaries }
     , marketing = { marketing | registryUtxo = RemoteData.Success registryUtxos.marketing }
+    }
+
+
+setTreasuryUtxos : Scopes (Utxo.RefDict Output) -> Scopes LoadingScope -> Scopes LoadingScope
+setTreasuryUtxos treasuryUtxos { ledger, consensus, mercenaries, marketing } =
+    { ledger = { ledger | treasuryUtxos = RemoteData.Success treasuryUtxos.ledger }
+    , consensus = { consensus | treasuryUtxos = RemoteData.Success treasuryUtxos.consensus }
+    , mercenaries = { mercenaries | treasuryUtxos = RemoteData.Success treasuryUtxos.mercenaries }
+    , marketing = { marketing | treasuryUtxos = RemoteData.Success treasuryUtxos.marketing }
     }
 
 
@@ -850,7 +929,7 @@ viewLoadingRootUtxo rootUtxo =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, registryNftPolicyId, registryUtxo, scopeUtxos } =
+viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, registryNftPolicyId, registryUtxo, treasuryUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
@@ -858,7 +937,7 @@ viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScri
         , viewTreasuryScript sundaeTreasuryScriptApplied
         , viewRegistryNftPolicyId registryNftPolicyId
         , viewRegistryUtxo registryUtxo
-        , viewScopeUtxos scopeUtxos
+        , viewTreasuryUtxos treasuryUtxos
         ]
 
 
@@ -914,8 +993,8 @@ viewRegistryUtxo registryUtxo =
             Html.p [] [ text <| "Registry UTxO loaded: " ++ Debug.toString ref ]
 
 
-viewScopeUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
-viewScopeUtxos loadingUtxos =
+viewTreasuryUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
+viewTreasuryUtxos loadingUtxos =
     case loadingUtxos of
         RemoteData.NotAsked ->
             Html.p [] [ text <| "Scope UTxOs not asked yet" ]
@@ -926,5 +1005,5 @@ viewScopeUtxos loadingUtxos =
         RemoteData.Failure error ->
             Html.p [] [ text <| "Scope UTxOs failed to load: " ++ error ]
 
-        RemoteData.Success _ ->
-            Html.p [] [ text <| "Scope UTxOs loaded" ]
+        RemoteData.Success utxos ->
+            Html.p [] [ text <| "Scope UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]

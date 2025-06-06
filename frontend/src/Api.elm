@@ -2,7 +2,7 @@ module Api exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
-import Cardano.Address exposing (NetworkId(..))
+import Cardano.Address as Address exposing (CredentialHash, NetworkId(..))
 import Cardano.Gov exposing (CostModels)
 import Cardano.MultiAsset as MultiAsset exposing (AssetName, MultiAsset, PolicyId)
 import Cardano.Transaction as Tx exposing (Transaction)
@@ -88,6 +88,75 @@ protocolParamsDecoder =
         (JD.at [ "result", "stakeCredentialDeposit", "ada", "lovelace" ] <| JD.map N.fromSafeInt JD.int)
 
 
+
+-- Script ref UTxOs
+
+
+retrieveScriptRefUtxos : { db : JD.Value } -> NetworkId -> Bytes CredentialHash -> ConcurrentTask String (Utxo.RefDict Output)
+retrieveScriptRefUtxos db networkId scriptHash =
+    let
+        url =
+            koiosUrl networkId ++ "/script_utxos?_script_hash=" ++ Bytes.toHex scriptHash
+
+        _ =
+            Debug.log "Retrieving script UTxOs for" url
+    in
+    ConcurrentTask.Http.get
+        { url = url
+        , headers = [ ConcurrentTask.Http.header "Authorization" <| "Bearer " ++ koiosApiToken ]
+        , expect = ConcurrentTask.Http.expectJson koiosLiveUtxosDecoder
+        , timeout = Nothing
+        }
+        |> ConcurrentTask.mapError Debug.toString
+        -- List OutputReference
+        |> ConcurrentTask.andThen (retrieveUtxos db networkId)
+        |> ConcurrentTask.map Utxo.refDictFromList
+
+
+
+-- Key payment cred UTxOs
+
+
+retrieveUtxosWithPaymentCreds : { db : JD.Value } -> NetworkId -> List (Bytes CredentialHash) -> ConcurrentTask String (BytesMap CredentialHash (Utxo.RefDict Output))
+retrieveUtxosWithPaymentCreds db networkId creds =
+    let
+        groupPerCredential : List ( OutputReference, Output ) -> BytesMap CredentialHash (Utxo.RefDict Output)
+        groupPerCredential utxos =
+            List.filterMap extractPaymentCred utxos
+                -- List (Bytes CredentialHash, (OutputReference, Output))
+                |> List.Extra.gatherEqualsBy (Tuple.first >> Bytes.toHex)
+                -- List (a, List a)
+                |> List.map
+                    (\( ( hash, utxo ), others ) ->
+                        ( hash, Utxo.refDictFromList <| utxo :: List.map Tuple.second others )
+                    )
+                -- List (Bytes CredentialHash, Utxo.RefDict Output)
+                |> Bytes.Map.fromList
+
+        extractPaymentCred ( ref, output ) =
+            Address.extractPaymentCred output.address
+                |> Maybe.map (\cred -> ( Address.extractCredentialHash cred, ( ref, output ) ))
+    in
+    ConcurrentTask.Http.post
+        { url = koiosUrl networkId ++ "/credential_utxos"
+        , headers = [ ConcurrentTask.Http.header "Authorization" <| "Bearer " ++ koiosApiToken ]
+        , body =
+            ConcurrentTask.Http.jsonBody <|
+                JE.object [ ( "_payment_credentials", JE.list Bytes.jsonEncode creds ) ]
+        , expect = ConcurrentTask.Http.expectJson koiosLiveUtxosDecoder
+        , timeout = Nothing
+        }
+        |> ConcurrentTask.mapError Debug.toString
+        -- List OutputReference
+        |> ConcurrentTask.andThen (retrieveUtxos db networkId)
+        -- List (OutputReference, Output)
+        |> ConcurrentTask.map groupPerCredential
+
+
+
+-- Asset UTxOs
+
+
 {-| Retrieve all UTxOs associated with the provided tokens
 -}
 retrieveAssetsUtxos : { db : JD.Value } -> NetworkId -> List ( Bytes PolicyId, Bytes AssetName ) -> ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
@@ -110,21 +179,9 @@ retrieveAssetsUtxos db networkId assets =
                 insertUtxoIfAssetPresent ( id, name ) assetUtxos =
                     case MultiAsset.get id name output.amount.assets of
                         Nothing ->
-                            let
-                                _ =
-                                    Debug.log (Bytes.toHex id ++ " / " ++ Bytes.pretty name) <|
-                                        "NOT found in "
-                                            ++ Utxo.refAsString ref
-                            in
                             assetUtxos
 
                         Just _ ->
-                            let
-                                _ =
-                                    Debug.log (Bytes.toHex id ++ " / " ++ Bytes.pretty name) <|
-                                        "found in "
-                                            ++ Utxo.refAsString ref
-                            in
                             -- Insert (ref, output) into assetUtxos[id][name]
                             MultiAsset.get id name assetUtxos
                                 |> Maybe.withDefault []
