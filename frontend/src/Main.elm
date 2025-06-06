@@ -89,6 +89,7 @@ type Msg
     = NoMsg
     | UrlChanged String
     | WalletMsg JD.Value
+    | DisconnectWallet
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
       -- Task port
@@ -430,6 +431,9 @@ update msg model =
 
         WalletMsg value ->
             handleWalletMsg value model
+
+        DisconnectWallet ->
+            ( { model | connectedWallet = Nothing }, Cmd.none )
 
         ConnectButtonClicked { id } ->
             ( model, toWallet (Cip30.encodeRequest (Cip30.enableWallet { id = id, extensions = [], watchInterval = Just 3 })) )
@@ -953,6 +957,7 @@ viewConnectedWallet wallet =
     div []
         [ div [] [ text <| "Wallet: " ++ (Cip30.walletDescriptor wallet).name ]
         , div [] [ text <| "Address: " ++ (Address.toBech32 <| Cip30.walletChangeAddress wallet) ]
+        , Html.button [ onClick DisconnectWallet ] [ text "Disconnect" ]
         ]
 
 
@@ -1106,7 +1111,7 @@ viewLoadingRegistryUtxo registryUtxo =
 
 viewRegistryUtxo : ( OutputReference, Output ) -> Html msg
 viewRegistryUtxo ( ref, _ ) =
-    Html.p [] [ text <| "Registry UTxO loaded: " ++ Utxo.refAsString ref ]
+    Html.p [] [ text <| "Registry UTxO: " ++ Utxo.refAsString ref ]
 
 
 viewLoadingTreasuryUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
@@ -1128,7 +1133,7 @@ viewLoadingTreasuryUtxos loadingUtxos =
 viewTreasuryUtxos : Utxo.RefDict Output -> Html Msg
 viewTreasuryUtxos utxos =
     div []
-        [ Html.p [] [ text <| "Treasury UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
+        [ Html.p [] [ text <| "Treasury UTxOs count: " ++ String.fromInt (Dict.Any.size utxos) ]
         , Html.p [] [ text <| "TODO: add buttons for possible actions with those UTxOs" ]
         , Html.ul [] <|
             List.map viewDetailedUtxo (Dict.Any.toList utxos)
