@@ -244,12 +244,12 @@ type alias Scopes a =
 
 type alias Scope =
     { owner : MultisigScript
-    , ownerScript : PlutusScript
-    , sundaeTreasuryScript : PlutusScript
+    , permissionsScript : ( Bytes CredentialHash, PlutusScript )
+    , sundaeTreasuryScript : ( Bytes CredentialHash, PlutusScript )
     , registryUtxo : ( OutputReference, Output )
 
     -- TODO: make sure they are updated after every Tx
-    , utxos : Utxo.RefDict Output
+    , treasuryUtxos : Utxo.RefDict Output
     }
 
 
@@ -494,10 +494,10 @@ mergeUtxos : NetworkId -> Scope -> List (Bytes CredentialHash) -> List TxIntent
 mergeUtxos networkId scope requiredSigners =
     let
         utxos =
-            Dict.Any.toList scope.utxos
+            Dict.Any.toList scope.treasuryUtxos
 
         treasuryScriptBytes =
-            Script.cborWrappedBytes scope.sundaeTreasuryScript
+            Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
 
         requiredWithdrawals =
             -- Withdrawal with the scope owner script
@@ -510,8 +510,8 @@ mergeUtxos networkId scope requiredSigners =
                     Just <|
                         Witness.Plutus
                             { script =
-                                ( Script.plutusVersion scope.ownerScript
-                                , Witness.ByValue <| Script.cborWrappedBytes scope.ownerScript
+                                ( Script.plutusVersion permissionsScript
+                                , Witness.ByValue <| Script.cborWrappedBytes permissionsScript
                                 )
                             , redeemerData = \_ -> Debug.todo "Standard Owner Redeemer"
                             , requiredSigners = requiredSigners
@@ -519,8 +519,8 @@ mergeUtxos networkId scope requiredSigners =
               }
             ]
 
-        ownerScriptHash =
-            Script.hash <| Script.Plutus scope.ownerScript
+        ( ownerScriptHash, permissionsScript ) =
+            scope.permissionsScript
 
         receivers value =
             [ TxIntent.SendTo scopeTreasuryAddress value ]
@@ -547,7 +547,7 @@ REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
 -}
 disburse : NetworkId -> Scope -> List (Bytes CredentialHash) -> OutputReference -> (Value -> List TxIntent) -> Value -> Result String (List TxIntent)
 disburse networkId scope requiredSigners utxoRef receivers value =
-    case Dict.Any.get utxoRef scope.utxos of
+    case Dict.Any.get utxoRef scope.treasuryUtxos of
         Nothing ->
             Err <| "The selected UTxO isn’t in the known list of UTxOs for this scope: " ++ Debug.toString utxoRef
 
@@ -555,7 +555,7 @@ disburse networkId scope requiredSigners utxoRef receivers value =
             let
                 spendConfig : SpendConfig
                 spendConfig =
-                    { treasuryScriptBytes = Script.cborWrappedBytes scope.sundaeTreasuryScript
+                    { treasuryScriptBytes = Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
                     , requiredSigners = requiredSigners
                     , requiredWithdrawals = requiredWithdrawals
                     , spentInputRef = utxoRef
@@ -573,8 +573,8 @@ disburse networkId scope requiredSigners utxoRef receivers value =
                             Just <|
                                 Witness.Plutus
                                     { script =
-                                        ( Script.plutusVersion scope.ownerScript
-                                        , Witness.ByValue <| Script.cborWrappedBytes scope.ownerScript
+                                        ( Script.plutusVersion permissionsScript
+                                        , Witness.ByValue <| Script.cborWrappedBytes permissionsScript
                                         )
                                     , redeemerData = \_ -> Debug.todo "Standard/Swap Owner Redeemer"
                                     , requiredSigners = requiredSigners
@@ -582,8 +582,8 @@ disburse networkId scope requiredSigners utxoRef receivers value =
                       }
                     ]
 
-                ownerScriptHash =
-                    Script.hash <| Script.Plutus scope.ownerScript
+                ( ownerScriptHash, permissionsScript ) =
+                    scope.permissionsScript
 
                 overflowValue =
                     Value.subtract value spentOutput.amount
@@ -688,6 +688,7 @@ handleCompletedTask model taskCompleted =
                         | treasuryManagement =
                             TreasuryLoading { loadingTreasury | scopes = setRegistryUtxos registryUtxos scopes }
                       }
+                        |> upgradeIfTreasuryLoadingFinished
                     , Cmd.none
                     )
 
@@ -703,6 +704,7 @@ handleCompletedTask model taskCompleted =
                         | treasuryManagement =
                             TreasuryLoading { loadingTreasury | scopes = setTreasuryUtxos treasuriesUtxos scopes }
                       }
+                        |> upgradeIfTreasuryLoadingFinished
                     , Cmd.none
                     )
 
@@ -820,6 +822,65 @@ applySundaeTreasuryScript unappliedScript scope =
             (\applied -> RemoteData.Success ( Script.hash <| Script.Plutus applied, applied ))
 
 
+upgradeIfTreasuryLoadingFinished : Model -> Model
+upgradeIfTreasuryLoadingFinished model =
+    case model.treasuryManagement of
+        TreasuryLoading { rootUtxo, scopes } ->
+            case ( rootUtxo, upgradeScopesIfLoadingFinished scopes ) of
+                ( RemoteData.Success ( ref, output ), Just loadedScopes ) ->
+                    -- Upgrade the treasury management
+                    -- AND the local state utxos
+                    { model
+                        | treasuryManagement = TreasuryFullyLoaded { rootUtxo = ( ref, output ), scopes = loadedScopes }
+                        , localStateUtxos = addLoadedUtxos ( ref, output ) loadedScopes model.localStateUtxos
+                    }
+
+                _ ->
+                    model
+
+        _ ->
+            model
+
+
+upgradeScopesIfLoadingFinished : Scopes LoadingScope -> Maybe (Scopes Scope)
+upgradeScopesIfLoadingFinished { ledger, consensus, mercenaries, marketing } =
+    Maybe.map4 Scopes
+        (upgradeScope ledger)
+        (upgradeScope consensus)
+        (upgradeScope mercenaries)
+        (upgradeScope marketing)
+
+
+upgradeScope : LoadingScope -> Maybe Scope
+upgradeScope scope =
+    case ( scope.owner, ( scope.sundaeTreasuryScriptApplied, scope.registryUtxo, scope.treasuryUtxos ) ) of
+        ( Just owner, ( RemoteData.Success treasuryScriptApplied, RemoteData.Success registryUtxo, RemoteData.Success treasuryUtxos ) ) ->
+            Just
+                { owner = owner
+                , permissionsScript = scope.permissionsScriptApplied
+                , sundaeTreasuryScript = treasuryScriptApplied
+                , registryUtxo = registryUtxo
+                , treasuryUtxos = treasuryUtxos
+                }
+
+        _ ->
+            Nothing
+
+
+addLoadedUtxos : ( OutputReference, Output ) -> Scopes Scope -> Utxo.RefDict Output -> Utxo.RefDict Output
+addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketing } localState =
+    let
+        addScopeUtxos scope accum =
+            Dict.Any.union scope.treasuryUtxos accum
+                |> Dict.Any.insert (Tuple.first scope.registryUtxo) (Tuple.second scope.registryUtxo)
+    in
+    addScopeUtxos ledger localState
+        |> addScopeUtxos consensus
+        |> addScopeUtxos mercenaries
+        |> addScopeUtxos marketing
+        |> Dict.Any.insert rootRef rootOutput
+
+
 
 -- VIEW ##############################################################
 
@@ -828,6 +889,7 @@ view : Model -> Html Msg
 view model =
     div []
         [ viewWalletSection model
+        , viewLocalStateUtxosSection model.localStateUtxos
         , viewTreasurySection model.treasuryManagement
         , viewError model.error
         ]
@@ -886,6 +948,15 @@ viewConnectedWallet wallet =
         [ div [] [ text <| "Wallet: " ++ (Cip30.walletDescriptor wallet).name ]
         , div [] [ text <| "Address: " ++ (Address.toBech32 <| Cip30.walletChangeAddress wallet) ]
         ]
+
+
+
+-- Local state UTxOs
+
+
+viewLocalStateUtxosSection : Utxo.RefDict Output -> Html msg
+viewLocalStateUtxosSection utxos =
+    Html.p [] [ text <| "Local state UTxOs size: " ++ String.fromInt (Dict.Any.size utxos) ]
 
 
 
