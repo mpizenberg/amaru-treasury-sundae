@@ -476,6 +476,12 @@ handleWalletMsg value model =
             , Cmd.none
             )
 
+        -- We just received a CIP-30 api error from the wallet
+        Ok (Cip30.ApiError { code, info }) ->
+            ( { model | error = Just <| "Wallet Error (code " ++ String.fromInt code ++ "):\n" ++ info }
+            , Cmd.none
+            )
+
         -- TODO: handle the error case
         _ ->
             ( model, Cmd.none )
@@ -888,10 +894,10 @@ addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketi
 view : Model -> Html Msg
 view model =
     div []
-        [ viewWalletSection model
+        [ viewError model.error
+        , viewWalletSection model
         , viewLocalStateUtxosSection model.localStateUtxos
         , viewTreasurySection model.treasuryManagement
-        , viewError model.error
         ]
 
 
