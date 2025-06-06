@@ -377,13 +377,17 @@ retrieveAllTxsBytesWithCache db networkId txIds =
             (\{ success, notFoundInCache } ->
                 -- Make a request for all not found
                 -- and aggregate with those from cache
-                retrieveAllTxsBytes networkId notFoundInCache
-                    |> ConcurrentTask.mapError Debug.toString
-                    |> ConcurrentTask.andThen
-                        (\txs ->
-                            writeTxsToCache txs
-                                |> ConcurrentTask.andThenDo (ConcurrentTask.succeed <| success ++ txs)
-                        )
+                if List.isEmpty notFoundInCache then
+                    ConcurrentTask.succeed success
+
+                else
+                    retrieveAllTxsBytes networkId notFoundInCache
+                        |> ConcurrentTask.mapError Debug.toString
+                        |> ConcurrentTask.andThen
+                            (\txs ->
+                                writeTxsToCache txs
+                                    |> ConcurrentTask.andThenDo (ConcurrentTask.succeed <| success ++ txs)
+                            )
             )
 
 
