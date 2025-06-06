@@ -1,0 +1,31 @@
+{
+  "name": "amaru-treasury-frontend",
+  "version": "1.0.0",
+  "description": "Frontend to help manage the Amaru Treasury",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "make": "elm-cardano make src/Main.elm --output main.js",
+    "watch": "elm-watch hot",
+    "format": "elm-format src/",
+    "format:validate": "elm-format --validate src/",
+    "docs": "elm-doc-preview --port 8911"
+  },
+  "keywords": [
+    "cardano",
+    "amaru",
+    "treasury"
+  ],
+  "license": "MPL-2.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@lydell/elm": "^0.19.1-14",
+    "elm-cardano": "^0.8.0",
+    "elm-doc-preview": "^6.0.1",
+    "elm-format": "^0.8.7",
+    "elm-review": "^2.13.2",
+    "elm-test": "^0.19.1-revision12",
+    "elm-watch": "^2.0.0-beta.6"
+  }
+}
