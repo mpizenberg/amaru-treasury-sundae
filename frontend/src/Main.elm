@@ -6,10 +6,13 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
+import Cardano.CoinSelection as CoinSelection
 import Cardano.Data as Data exposing (Data)
 import Cardano.MultiAsset as MultiAsset exposing (MultiAsset, PolicyId)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
-import Cardano.TxIntent as TxIntent exposing (TxIntent, TxOtherInfo)
+import Cardano.Transaction exposing (Transaction)
+import Cardano.TxExamples exposing (prettyTx)
+import Cardano.TxIntent as TxIntent exposing (TxFinalizationError, TxFinalized, TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
@@ -92,6 +95,8 @@ type Msg
     | DisconnectWallet
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
+      -- Treasury management
+    | TreasuryMergingMsg TreasuryMergingMsg
       -- Task port
     | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
     | OnTaskComplete (ConcurrentTask.Response String TaskCompleted)
@@ -120,6 +125,7 @@ type alias Model =
     , registriesSeedUtxo : OutputReference
     , scripts : Scripts
     , treasuryManagement : TreasuryManagement
+    , treasuryAction : TreasuryAction
     , error : Maybe String
     }
 
@@ -138,6 +144,7 @@ initialModel db pragmaScriptHash ( txId, outputIndex ) scripts =
     , registriesSeedUtxo = OutputReference (Bytes.fromHexUnchecked txId) outputIndex
     , scripts = scripts
     , treasuryManagement = TreasuryUnspecified
+    , treasuryAction = NoTreasuryAction
     , error = Nothing
     }
 
@@ -252,6 +259,26 @@ type alias Scope =
     -- TODO: make sure they are updated after every Tx
     , treasuryUtxos : Utxo.RefDict Output
     }
+
+
+type TreasuryAction
+    = NoTreasuryAction
+    | MergeTreasuryUtxos MergeTreasuryUtxosState
+
+
+type alias MergeTreasuryUtxosState =
+    { scopeName : String
+    , scope : Scope
+    , rootUtxo : OutputReference
+    , status : MergeStatus
+    }
+
+
+type MergeStatus
+    = MergeIdle
+    | MergeBuilding (Result TxFinalizationError TxFinalized)
+    | MergeAwaitingSignature Transaction
+    | MergeSubmitting Transaction
 
 
 init : Flags -> ( Model, Cmd Msg )
@@ -444,6 +471,9 @@ update msg model =
         GotNetworkParams (Ok params) ->
             ( { model | protocolParams = params }, Cmd.none )
 
+        TreasuryMergingMsg submsg ->
+            handleTreasuryMergingMsg submsg model
+
         OnTaskProgress ( taskPool, cmd ) ->
             ( { model | taskPool = taskPool }, cmd )
 
@@ -495,6 +525,133 @@ handleWalletMsg value model =
 -- Merge UTxOs
 
 
+type TreasuryMergingMsg
+    = StartMergeUtxos String Scope OutputReference
+    | BuildMergeTransaction (List (Bytes CredentialHash))
+    | SignMergeTransaction Transaction
+    | SubmitMergeTransaction Transaction
+    | CancelMergeAction
+
+
+handleTreasuryMergingMsg : TreasuryMergingMsg -> Model -> ( Model, Cmd Msg )
+handleTreasuryMergingMsg msg model =
+    case msg of
+        StartMergeUtxos scopeName scope rootUtxo ->
+            handleStartMergeUtxos scopeName scope rootUtxo model
+
+        BuildMergeTransaction requiredSigners ->
+            handleBuildMergeTransaction model requiredSigners
+
+        SignMergeTransaction transaction ->
+            handleSignMergeTransaction transaction model
+
+        SubmitMergeTransaction transaction ->
+            handleSubmitMergeTransaction transaction model
+
+        CancelMergeAction ->
+            ( { model | treasuryAction = NoTreasuryAction }, Cmd.none )
+
+
+handleStartMergeUtxos : String -> Scope -> OutputReference -> Model -> ( Model, Cmd Msg )
+handleStartMergeUtxos scopeName scope rootUtxo model =
+    if Dict.Any.size scope.treasuryUtxos > 1 then
+        let
+            mergeState =
+                { scopeName = scopeName
+                , scope = scope
+                , rootUtxo = rootUtxo
+                , status = MergeIdle
+                }
+        in
+        ( { model | treasuryAction = MergeTreasuryUtxos mergeState }
+        , Cmd.none
+        )
+
+    else
+        ( { model | error = Just "Scope has insufficient UTXOs to merge" }
+        , Cmd.none
+        )
+
+
+handleBuildMergeTransaction : Model -> List (Bytes CredentialHash) -> ( Model, Cmd Msg )
+handleBuildMergeTransaction model requiredSigners =
+    case ( model.treasuryAction, model.connectedWallet ) of
+        ( MergeTreasuryUtxos mergeState, Just wallet ) ->
+            let
+                mergeTxIntents =
+                    mergeUtxos model.networkId mergeState.scope requiredSigners
+
+                -- TODO: update TxOtherInfo
+                txOtherInfo =
+                    [ TxIntent.TxReferenceInput mergeState.rootUtxo ]
+
+                feeSource =
+                    Cip30.walletChangeAddress wallet
+
+                txResult =
+                    TxIntent.finalizeAdvanced
+                        { govState = TxIntent.emptyGovernanceState
+                        , localStateUtxos = model.localStateUtxos
+                        , coinSelectionAlgo = CoinSelection.largestFirst
+                        , evalScriptsCosts = TxIntent.defaultEvalScriptsCosts feeSource mergeTxIntents
+                        , costModels = Uplc.conwayDefaultCostModels
+                        }
+                        (TxIntent.AutoFee { paymentSource = feeSource })
+                        txOtherInfo
+                        mergeTxIntents
+
+                updatedMergeState =
+                    { mergeState | status = MergeBuilding txResult }
+
+                updatedModel =
+                    { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
+            in
+            ( updatedModel, Cmd.none )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+handleSignMergeTransaction : Transaction -> Model -> ( Model, Cmd Msg )
+handleSignMergeTransaction tx model =
+    case ( model.treasuryAction, model.connectedWallet ) of
+        ( MergeTreasuryUtxos mergeState, Just wallet ) ->
+            let
+                updatedMergeState =
+                    { mergeState | status = MergeAwaitingSignature tx }
+
+                updatedModel =
+                    { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
+
+                signCmd =
+                    toWallet <| Cip30.encodeRequest <| Cip30.signTx wallet { partialSign = True } tx
+            in
+            ( updatedModel, signCmd )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+handleSubmitMergeTransaction : Transaction -> Model -> ( Model, Cmd Msg )
+handleSubmitMergeTransaction tx model =
+    case ( model.treasuryAction, model.connectedWallet ) of
+        ( MergeTreasuryUtxos mergeState, Just wallet ) ->
+            let
+                updatedMergeState =
+                    { mergeState | status = MergeSubmitting tx }
+
+                updatedModel =
+                    { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
+
+                submitCmd =
+                    toWallet <| Cip30.encodeRequest <| Cip30.submitTx wallet tx
+            in
+            ( updatedModel, submitCmd )
+
+        _ ->
+            ( model, Cmd.none )
+
+
 {-| Merge all UTxOs from a given scope.
 
 REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
@@ -523,7 +680,9 @@ mergeUtxos networkId scope requiredSigners =
                                 ( Script.plutusVersion permissionsScript
                                 , Witness.ByValue <| Script.cborWrappedBytes permissionsScript
                                 )
-                            , redeemerData = \_ -> Debug.todo "Standard Owner Redeemer"
+
+                            -- TODO: have a proper redeemer?
+                            , redeemerData = \_ -> Data.Constr N.zero []
                             , requiredSigners = requiredSigners
                             }
               }
@@ -901,7 +1060,12 @@ view model =
         [ viewError model.error
         , viewWalletSection model
         , viewLocalStateUtxosSection model.localStateUtxos
-        , viewTreasurySection model.treasuryManagement
+        , case model.treasuryAction of
+            NoTreasuryAction ->
+                viewTreasurySection model.treasuryManagement
+
+            MergeTreasuryUtxos mergeState ->
+                viewMergeUtxosAction model.connectedWallet mergeState
         ]
 
 
@@ -991,13 +1155,17 @@ viewTreasurySection treasuryManagement =
                 ]
 
         TreasuryFullyLoaded { rootUtxo, scopes } ->
+            let
+                rootUtxoRef =
+                    Tuple.first rootUtxo
+            in
             div []
                 [ Html.p [] [ text "Treasury fully loaded" ]
                 , viewRootUtxo rootUtxo
-                , viewScope "ledger" scopes.ledger
-                , viewScope "consensus" scopes.consensus
-                , viewScope "mercenaries" scopes.mercenaries
-                , viewScope "marketing" scopes.marketing
+                , viewScope rootUtxoRef "ledger" scopes.ledger
+                , viewScope rootUtxoRef "consensus" scopes.consensus
+                , viewScope rootUtxoRef "mercenaries" scopes.mercenaries
+                , viewScope rootUtxoRef "marketing" scopes.marketing
                 ]
 
 
@@ -1035,15 +1203,15 @@ viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScri
         ]
 
 
-viewScope : String -> Scope -> Html Msg
-viewScope scopeName { owner, permissionsScript, sundaeTreasuryScript, registryUtxo, treasuryUtxos } =
+viewScope : OutputReference -> String -> Scope -> Html Msg
+viewScope rootUtxo scopeName ({ owner, permissionsScript, sundaeTreasuryScript, registryUtxo, treasuryUtxos } as scope) =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
         , viewPermissionsScript permissionsScript
         , viewTreasuryScript sundaeTreasuryScript
         , viewRegistryUtxo registryUtxo
-        , viewTreasuryUtxos treasuryUtxos
+        , viewTreasuryUtxos scopeName scope rootUtxo treasuryUtxos
         ]
 
 
@@ -1130,17 +1298,26 @@ viewLoadingTreasuryUtxos loadingUtxos =
             Html.p [] [ text <| "Treasury UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
 
 
-viewTreasuryUtxos : Utxo.RefDict Output -> Html Msg
-viewTreasuryUtxos utxos =
+viewTreasuryUtxos : String -> Scope -> OutputReference -> Utxo.RefDict Output -> Html Msg
+viewTreasuryUtxos scopeName scope rootUtxo utxos =
+    let
+        mergeButton =
+            if Dict.Any.size utxos > 1 then
+                Html.button [ onClick (StartMergeUtxos scopeName scope rootUtxo) ] [ text "Merge UTxOs" ]
+
+            else
+                text ""
+    in
     div []
         [ Html.p [] [ text <| "Treasury UTxOs count: " ++ String.fromInt (Dict.Any.size utxos) ]
         , Html.p [] [ text <| "TODO: add buttons for possible actions with those UTxOs" ]
+        , Html.map TreasuryMergingMsg mergeButton
         , Html.ul [] <|
             List.map viewDetailedUtxo (Dict.Any.toList utxos)
         ]
 
 
-viewDetailedUtxo : ( OutputReference, Output ) -> Html Msg
+viewDetailedUtxo : ( OutputReference, Output ) -> Html msg
 viewDetailedUtxo ( ref, output ) =
     Html.li []
         [ div [] [ text <| "UTxO: " ++ Utxo.refAsString ref ]
@@ -1153,3 +1330,65 @@ viewDetailedUtxo ( ref, output ) =
 spinner : Html msg
 spinner =
     Html.span [ HA.class "loader" ] []
+
+
+
+-- Merge UTxOs
+
+
+viewMergeUtxosAction : Maybe Cip30.Wallet -> MergeTreasuryUtxosState -> Html Msg
+viewMergeUtxosAction maybeWallet mergeState =
+    Html.map TreasuryMergingMsg <|
+        div []
+            [ Html.h3 [] [ text ("Merge UTXOs - " ++ mergeState.scopeName ++ " Scope") ]
+            , div [] [ text ("UTXOs to merge: " ++ String.fromInt (Dict.Any.size mergeState.scope.treasuryUtxos)) ]
+            , Html.ul [] <|
+                List.map viewDetailedUtxo (Dict.Any.toList mergeState.scope.treasuryUtxos)
+            , case mergeState.status of
+                MergeIdle ->
+                    let
+                        -- FIXME: temporary, something more robust should be done,
+                        -- and not inside the view, but this works as a MVP.
+                        requiredSigners =
+                            MultisigScript.extractRequiredSigners mergeState.scope.owner
+                    in
+                    case maybeWallet of
+                        Nothing ->
+                            div []
+                                [ Html.p [] [ text "Please connect your wallet first, to pay the Tx fees." ]
+                                , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
+                                ]
+
+                        Just _ ->
+                            div []
+                                [ Html.p [] [ text "Ready to build merge transaction. This will combine all UTXOs in this scope into a single UTXO." ]
+                                , Html.button [ onClick (BuildMergeTransaction requiredSigners) ] [ text "Build Transaction" ]
+                                , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
+                                ]
+
+                MergeBuilding txFinalizedResult ->
+                    case txFinalizedResult of
+                        Err error ->
+                            div []
+                                [ Html.p [] [ text "Failed to build the Tx, with error:" ]
+                                , Html.pre [] [ text <| TxIntent.errorToString error ]
+                                , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
+                                ]
+
+                        Ok { tx, expectedSignatures } ->
+                            div []
+                                [ Html.p [] [ text "Merge Tx to be signed:" ]
+                                , Html.pre [] [ text <| prettyTx tx ]
+                                , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
+                                ]
+
+                MergeAwaitingSignature transaction ->
+                    div []
+                        [ Html.p [] [ text "Transaction built successfully. Please sign the transaction." ]
+                        , Html.button [ onClick (SignMergeTransaction transaction) ] [ text "Sign Transaction" ]
+                        , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
+                        ]
+
+                MergeSubmitting transaction ->
+                    div [] [ text " Submitting transaction...", spinner ]
+            ]

@@ -99,3 +99,22 @@ toData script =
 
         Script scriptHash ->
             Data.Constr N.six [ Data.Bytes <| Bytes.toAny scriptHash ]
+
+
+extractRequiredSigners : MultisigScript -> List (Bytes CredentialHash)
+extractRequiredSigners multisig =
+    case multisig of
+        Signature keyHash ->
+            [ keyHash ]
+
+        AllOf multisigs ->
+            List.concatMap extractRequiredSigners multisigs
+
+        AnyOf multisigs ->
+            List.concatMap extractRequiredSigners multisigs
+
+        AtLeast _ multisigs ->
+            List.concatMap extractRequiredSigners multisigs
+
+        _ ->
+            []
