@@ -979,8 +979,15 @@ viewTreasurySection treasuryManagement =
                 , viewLoadingScope "marketing" scopes.marketing
                 ]
 
-        TreasuryFullyLoaded _ ->
-            div [] [ text "Treasury fully loaded" ]
+        TreasuryFullyLoaded { rootUtxo, scopes } ->
+            div []
+                [ Html.p [] [ text "Treasury fully loaded" ]
+                , viewRootUtxo rootUtxo
+                , viewScope "ledger" scopes.ledger
+                , viewScope "consensus" scopes.consensus
+                , viewScope "mercenaries" scopes.mercenaries
+                , viewScope "marketing" scopes.marketing
+                ]
 
 
 viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
@@ -995,31 +1002,53 @@ viewLoadingRootUtxo rootUtxo =
         RemoteData.Failure error ->
             Html.p [] [ text <| "PRAGMA root UTxO failed to load: " ++ error ]
 
-        RemoteData.Success _ ->
-            Html.p [] [ text "PRAGMA root UTxO loaded" ]
+        RemoteData.Success utxo ->
+            viewRootUtxo utxo
+
+
+viewRootUtxo : ( OutputReference, Output ) -> Html msg
+viewRootUtxo ( ref, _ ) =
+    Html.p [] [ text <| "PRAGMA root UTxO: " ++ Utxo.refAsString ref ]
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
 viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, registryNftPolicyId, registryUtxo, treasuryUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
-        , viewOwner owner
+        , viewMaybeOwner owner
         , viewPermissionsScript permissionsScriptApplied
-        , viewTreasuryScript sundaeTreasuryScriptApplied
+        , viewLoadingTreasuryScript sundaeTreasuryScriptApplied
         , viewRegistryNftPolicyId registryNftPolicyId
+        , viewLoadingRegistryUtxo registryUtxo
+        , viewLoadingTreasuryUtxos treasuryUtxos
+        ]
+
+
+viewScope : String -> Scope -> Html Msg
+viewScope scopeName { owner, permissionsScript, sundaeTreasuryScript, registryUtxo, treasuryUtxos } =
+    div [ HA.style "border" "1px solid black" ]
+        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
+        , viewOwner owner
+        , viewPermissionsScript permissionsScript
+        , viewTreasuryScript sundaeTreasuryScript
         , viewRegistryUtxo registryUtxo
         , viewTreasuryUtxos treasuryUtxos
         ]
 
 
-viewOwner : Maybe MultisigScript -> Html msg
-viewOwner maybeOwner =
+viewMaybeOwner : Maybe MultisigScript -> Html msg
+viewMaybeOwner maybeOwner =
     case maybeOwner of
         Nothing ->
             Html.p [] [ text <| "Owner: loading ... ", spinner ]
 
         Just owner ->
-            Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
+            viewOwner owner
+
+
+viewOwner : MultisigScript -> Html msg
+viewOwner owner =
+    Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
 
 
 viewPermissionsScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
@@ -1027,8 +1056,8 @@ viewPermissionsScript ( hash, _ ) =
     Html.p [] [ text <| "Fully applied permissions script hash: " ++ Bytes.toHex hash ]
 
 
-viewTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) -> Html msg
-viewTreasuryScript remoteData =
+viewLoadingTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) -> Html msg
+viewLoadingTreasuryScript remoteData =
     case remoteData of
         RemoteData.NotAsked ->
             Html.p [] [ text <| "Sundae treasury script not asked yet" ]
@@ -1039,8 +1068,13 @@ viewTreasuryScript remoteData =
         RemoteData.Failure error ->
             Html.p [] [ text <| "Sundae treasury script failed to load: " ++ error ]
 
-        RemoteData.Success ( hash, _ ) ->
-            Html.p [] [ text <| "Fully applied Sundae treasury script hash: " ++ Bytes.toHex hash ]
+        RemoteData.Success script ->
+            viewTreasuryScript script
+
+
+viewTreasuryScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
+viewTreasuryScript ( hash, _ ) =
+    Html.p [] [ text <| "Fully applied Sundae treasury script hash: " ++ Bytes.toHex hash ]
 
 
 viewRegistryNftPolicyId : Bytes PolicyId -> Html msg
@@ -1048,8 +1082,8 @@ viewRegistryNftPolicyId policyId =
     Html.p [] [ text <| "Registry trap policy ID: " ++ Bytes.toHex policyId ]
 
 
-viewRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
-viewRegistryUtxo registryUtxo =
+viewLoadingRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
+viewLoadingRegistryUtxo registryUtxo =
     case registryUtxo of
         RemoteData.NotAsked ->
             Html.p [] [ text <| "Registry UTxO not asked yet" ]
@@ -1060,24 +1094,49 @@ viewRegistryUtxo registryUtxo =
         RemoteData.Failure error ->
             Html.p [] [ text <| "Registry UTxO failed to load: " ++ error ]
 
-        RemoteData.Success ( ref, _ ) ->
-            Html.p [] [ text <| "Registry UTxO loaded: " ++ Debug.toString ref ]
+        RemoteData.Success utxo ->
+            viewRegistryUtxo utxo
 
 
-viewTreasuryUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
-viewTreasuryUtxos loadingUtxos =
+viewRegistryUtxo : ( OutputReference, Output ) -> Html msg
+viewRegistryUtxo ( ref, _ ) =
+    Html.p [] [ text <| "Registry UTxO loaded: " ++ Utxo.refAsString ref ]
+
+
+viewLoadingTreasuryUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
+viewLoadingTreasuryUtxos loadingUtxos =
     case loadingUtxos of
         RemoteData.NotAsked ->
-            Html.p [] [ text <| "Scope UTxOs not asked yet" ]
+            Html.p [] [ text <| "Treasury UTxOs not asked yet" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text <| "Scope UTxOs loading ... ", spinner ]
+            Html.p [] [ text <| "Treasury UTxOs loading ... ", spinner ]
 
         RemoteData.Failure error ->
-            Html.p [] [ text <| "Scope UTxOs failed to load: " ++ error ]
+            Html.p [] [ text <| "Treasury UTxOs failed to load: " ++ error ]
 
         RemoteData.Success utxos ->
-            Html.p [] [ text <| "Scope UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
+            Html.p [] [ text <| "Treasury UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
+
+
+viewTreasuryUtxos : Utxo.RefDict Output -> Html Msg
+viewTreasuryUtxos utxos =
+    div []
+        [ Html.p [] [ text <| "Treasury UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
+        , Html.p [] [ text <| "TODO: add buttons for possible actions with those UTxOs" ]
+        , Html.ul [] <|
+            List.map viewDetailedUtxo (Dict.Any.toList utxos)
+        ]
+
+
+viewDetailedUtxo : ( OutputReference, Output ) -> Html Msg
+viewDetailedUtxo ( ref, output ) =
+    Html.li []
+        [ div [] [ text <| "UTxO: " ++ Utxo.refAsString ref ]
+        , div [] [ text <| "Address: " ++ Address.toBech32 output.address ]
+        , div [] [ text <| "Value: (₳ amounts are in Lovelaces)" ]
+        , Html.pre [] [ text <| String.join "\n" <| Value.toMultilineString output.amount ]
+        ]
 
 
 spinner : Html msg
