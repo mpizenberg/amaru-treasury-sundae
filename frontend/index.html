@@ -30,11 +30,12 @@
             const amaruBlueprint = await (
                 await fetch("./amaru-plutus.json")
             ).json();
-            // TODO: ideally this seed UTxO also comes from a file inside amaru-build/
-            const registriesSeedUtxo = {
-                txId: "666c84705006c796f74e3410114244ceddc88041141b7d17bc81846b20386edd",
-                outputIndex: 1,
-            };
+            const registriesSeedUtxo = await (
+                await fetch("./amaru-build/registry-seed.json")
+            ).json();
+            const treasuryConfig = await (
+                await fetch("./amaru-build/treasury-configuration.json")
+            ).json();
             var app = Elm.Main.init({
                 node: document.getElementById("myapp"),
                 flags: {
@@ -42,6 +43,7 @@
                     db,
                     pragmaScriptHash,
                     registriesSeedUtxo,
+                    treasuryConfigExpiration: treasuryConfig.expiration,
                     blueprints: [sundaeBlueprint, amaruBlueprint],
                 },
             });

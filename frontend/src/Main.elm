@@ -27,7 +27,7 @@ import Http
 import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
-import Natural as N
+import Natural as N exposing (Natural)
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
@@ -39,7 +39,8 @@ type alias Flags =
     { url : String
     , db : JD.Value
     , pragmaScriptHash : String
-    , registriesSeedUtxo : { txId : String, outputIndex : Int }
+    , registriesSeedUtxo : { transactionId : String, outputIndex : Int }
+    , treasuryConfigExpiration : Int
     , blueprints : List JD.Value
     }
 
@@ -123,6 +124,7 @@ type alias Model =
     , localStateUtxos : Utxo.RefDict Output
     , pragmaScriptHash : Bytes CredentialHash
     , registriesSeedUtxo : OutputReference
+    , treasuryConfigExpiration : Natural
     , scripts : Scripts
     , treasuryManagement : TreasuryManagement
     , treasuryAction : TreasuryAction
@@ -130,8 +132,8 @@ type alias Model =
     }
 
 
-initialModel : JD.Value -> String -> ( String, Int ) -> Scripts -> Model
-initialModel db pragmaScriptHash ( txId, outputIndex ) scripts =
+initialModel : JD.Value -> String -> ( String, Int ) -> Int -> Scripts -> Model
+initialModel db pragmaScriptHash ( txId, outputIndex ) expiration scripts =
     { taskPool = ConcurrentTask.pool
     , db = db
     , page = Home
@@ -142,6 +144,7 @@ initialModel db pragmaScriptHash ( txId, outputIndex ) scripts =
     , localStateUtxos = Utxo.emptyRefDict
     , pragmaScriptHash = Bytes.fromHexUnchecked pragmaScriptHash
     , registriesSeedUtxo = OutputReference (Bytes.fromHexUnchecked txId) outputIndex
+    , treasuryConfigExpiration = N.fromSafeInt expiration
     , scripts = scripts
     , treasuryManagement = TreasuryUnspecified
     , treasuryAction = NoTreasuryAction
@@ -172,8 +175,8 @@ type alias LoadingTreasury =
     }
 
 
-initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Result String LoadingTreasury
-initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo =
+initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Natural -> Result String LoadingTreasury
+initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo treasuryConfigExpiration =
     let
         initLoadingScopeWithIndex index =
             initLoadingScope
@@ -181,6 +184,7 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
                 pragmaScriptHash
                 unappliedRegistryTrapScript
                 registriesSeedUtxo
+                treasuryConfigExpiration
                 index
 
         loadingTreasury ledger consensus mercenaries marketing =
@@ -202,11 +206,12 @@ type alias LoadingScope =
     , registryNftPolicyId : Bytes PolicyId
     , registryUtxo : RemoteData String ( OutputReference, Output )
     , treasuryUtxos : RemoteData String (Utxo.RefDict Output)
+    , expiration : Natural
     }
 
 
-initLoadingScope : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Int -> Result String LoadingScope
-initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo scopeIndex =
+initLoadingScope : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Natural -> Int -> Result String LoadingScope
+initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo treasuryConfigExpiration scopeIndex =
     let
         permissionsScriptResult =
             Uplc.applyParamsToScript
@@ -229,6 +234,7 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
             , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
             , registryUtxo = RemoteData.Loading
             , treasuryUtxos = RemoteData.NotAsked
+            , expiration = treasuryConfigExpiration
             }
     in
     Result.map2 loadingScope
@@ -282,7 +288,7 @@ type MergeStatus
 
 
 init : Flags -> ( Model, Cmd Msg )
-init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
+init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, blueprints } =
     let
         decodedBlueprints : List ScriptBlueprint
         decodedBlueprints =
@@ -319,7 +325,7 @@ init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
                     )
 
         model =
-            initialModel db pragmaScriptHash ( registriesSeedUtxo.txId, registriesSeedUtxo.outputIndex ) scripts
+            initialModel db pragmaScriptHash ( registriesSeedUtxo.transactionId, registriesSeedUtxo.outputIndex ) treasuryConfigExpiration scripts
 
         -- Load Pragma UTxO
         ( updatedTaskPool, loadPragmaUtxoCmd ) =
@@ -339,6 +345,7 @@ init { db, pragmaScriptHash, registriesSeedUtxo, blueprints } =
                 model.pragmaScriptHash
                 model.scripts.registryTrap
                 model.registriesSeedUtxo
+                model.treasuryConfigExpiration
 
         loadRegistryUtxos : Scopes LoadingScope -> ConcurrentTask String (Scopes ( OutputReference, Output ))
         loadRegistryUtxos loadingScopes =
@@ -680,8 +687,6 @@ mergeUtxos networkId scope requiredSigners =
                                 ( Script.plutusVersion permissionsScript
                                 , Witness.ByValue <| Script.cborWrappedBytes permissionsScript
                                 )
-
-                            -- TODO: have a proper redeemer?
                             , redeemerData = \_ -> Data.Constr N.zero []
                             , requiredSigners = requiredSigners
                             }
@@ -851,7 +856,7 @@ handleCompletedTask model taskCompleted =
         LoadedRegistryUtxos registryUtxos ->
             case model.treasuryManagement of
                 TreasuryLoading ({ scopes } as loadingTreasury) ->
-                    -- TODO: if all UTxOs have been loaded (registry and scope)
+                    -- If all UTxOs have been loaded (registry and scope)
                     -- then we can convert into a LoadedTreasury
                     ( { model
                         | treasuryManagement =
@@ -867,7 +872,7 @@ handleCompletedTask model taskCompleted =
         LoadedTreasuriesUtxos treasuriesUtxos ->
             case model.treasuryManagement of
                 TreasuryLoading ({ scopes } as loadingTreasury) ->
-                    -- TODO: if all UTxOs have been loaded (registry and scope)
+                    -- If all UTxOs have been loaded (registry and scope)
                     -- then we can convert into a LoadedTreasury
                     ( { model
                         | treasuryManagement =
@@ -980,9 +985,7 @@ applySundaeTreasuryScript unappliedScript scope =
                 , disburse = multisig
                 , unregister = multisig
                 }
-
-            -- TODO: retrieve expiration from aiken build outputs
-            , expiration = N.fromSafeInt 1767182399000
+            , expiration = scope.expiration
             , payoutUpperbound = N.zero
             }
     in
