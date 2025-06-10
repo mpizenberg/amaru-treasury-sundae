@@ -105,8 +105,8 @@ type Msg
 
 type TaskCompleted
     = LoadedPragmaUtxo ( OutputReference, Output )
-    | LoadedRegistryUtxos (Scopes ( OutputReference, Output ))
-    | LoadedTreasuriesUtxos (Scopes (Utxo.RefDict Output))
+    | LoadedRegistryUtxos ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
+    | LoadedTreasuriesUtxos ( Scopes (Utxo.RefDict Output), Utxo.RefDict Output )
 
 
 
@@ -172,6 +172,7 @@ type TreasuryManagement
 type alias LoadingTreasury =
     { rootUtxo : RemoteData String ( OutputReference, Output )
     , scopes : Scopes LoadingScope
+    , contingency : LoadingScope
     }
 
 
@@ -187,16 +188,19 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
                 treasuryConfigExpiration
                 index
 
-        loadingTreasury ledger consensus mercenaries marketing =
+        loadingTreasury ledger consensus mercenaries marketing contingency =
             { rootUtxo = RemoteData.Loading
             , scopes = Scopes ledger consensus mercenaries marketing
+            , contingency = contingency
             }
     in
-    Result.map4 loadingTreasury
+    Result.map5 loadingTreasury
         (initLoadingScopeWithIndex 0)
         (initLoadingScopeWithIndex 1)
         (initLoadingScopeWithIndex 2)
         (initLoadingScopeWithIndex 3)
+        -- contingency
+        (initLoadingScopeWithIndex 4)
 
 
 type alias LoadingScope =
@@ -245,6 +249,7 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
 type alias LoadedTreasury =
     { rootUtxo : ( OutputReference, Output )
     , scopes : Scopes Scope
+    , contingency : Scope
     }
 
 
@@ -347,8 +352,8 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
                 model.registriesSeedUtxo
                 model.treasuryConfigExpiration
 
-        loadRegistryUtxos : Scopes LoadingScope -> ConcurrentTask String (Scopes ( OutputReference, Output ))
-        loadRegistryUtxos loadingScopes =
+        loadRegistryUtxos : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
+        loadRegistryUtxos loadingScopes contingencyScope =
             let
                 registryAssets =
                     Scopes
@@ -356,6 +361,9 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
                         ( loadingScopes.consensus.registryNftPolicyId, Bytes.fromText "consensus" )
                         ( loadingScopes.mercenaries.registryNftPolicyId, Bytes.fromText "mercenaries" )
                         ( loadingScopes.marketing.registryNftPolicyId, Bytes.fromText "marketing" )
+
+                contingencyAsset =
+                    ( contingencyScope.registryNftPolicyId, Bytes.fromText "contingency" )
 
                 -- Query assets utxos
                 assetsUtxosTask : ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
@@ -366,15 +374,17 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
                         , registryAssets.consensus
                         , registryAssets.mercenaries
                         , registryAssets.marketing
+                        , contingencyAsset
                         ]
 
-                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> ConcurrentTask String (Scopes ( OutputReference, Output ))
+                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
                 extractLoadedUtxos assetsUtxos =
-                    Result.map4 Scopes
+                    Result.map5 (\s1 s2 s3 s4 contingency -> ( Scopes s1 s2 s3 s4, contingency ))
                         (extractRegistryUtxo registryAssets.ledger assetsUtxos)
                         (extractRegistryUtxo registryAssets.consensus assetsUtxos)
                         (extractRegistryUtxo registryAssets.mercenaries assetsUtxos)
                         (extractRegistryUtxo registryAssets.marketing assetsUtxos)
+                        (extractRegistryUtxo contingencyAsset assetsUtxos)
                         |> ConcurrentTask.fromResult
 
                 extractRegistryUtxo ( policyId, assetName ) multiAsset =
@@ -395,8 +405,8 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
             in
             ConcurrentTask.andThen extractLoadedUtxos assetsUtxosTask
 
-        attemptLoadRegistryUtxosTask loadingScopes =
-            loadRegistryUtxos loadingScopes
+        attemptLoadRegistryUtxosTask loadingScopes contingencyScope =
+            loadRegistryUtxos loadingScopes contingencyScope
                 |> ConcurrentTask.map LoadedRegistryUtxos
                 |> ConcurrentTask.attempt
                     { pool = updatedTaskPool
@@ -408,7 +418,7 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
         ( Nothing, Ok loadingTreasury ) ->
             let
                 ( updatedAgainTaskPool, loadRegistryUtxosCmd ) =
-                    attemptLoadRegistryUtxosTask loadingTreasury.scopes
+                    attemptLoadRegistryUtxosTask loadingTreasury.scopes loadingTreasury.contingency
             in
             ( { model
                 | taskPool = updatedAgainTaskPool
@@ -808,9 +818,9 @@ handleCompletedTask model taskCompleted =
                                 loadingScopes =
                                     -- TODO: add the contingency scope
                                     case treasuryManagement of
-                                        TreasuryLoading { scopes } ->
+                                        TreasuryLoading { scopes, contingency } ->
                                             -- The list order is the same as the order of the scopes
-                                            [ scopes.ledger, scopes.consensus, scopes.mercenaries, scopes.marketing ]
+                                            [ scopes.ledger, scopes.consensus, scopes.mercenaries, scopes.marketing, contingency ]
 
                                         _ ->
                                             []
@@ -835,10 +845,14 @@ handleCompletedTask model taskCompleted =
 
                                 listToScopes utxosInList =
                                     case utxosInList of
-                                        [ ledgerUtxos, consensusUtxos, mercenariesUtxos, marketingUtxos ] ->
-                                            ConcurrentTask.succeed (Scopes ledgerUtxos consensusUtxos mercenariesUtxos marketingUtxos)
+                                        [ ledgerUtxos, consensusUtxos, mercenariesUtxos, marketingUtxos, contingencyUtxos ] ->
+                                            ConcurrentTask.succeed ( Scopes ledgerUtxos consensusUtxos mercenariesUtxos marketingUtxos, contingencyUtxos )
 
                                         _ ->
+                                            let
+                                                _ =
+                                                    Debug.log "utxosInList" utxosInList
+                                            in
                                             ConcurrentTask.fail "Something unexpected happened while trying to retrieve scopes treasuries UTxOs"
                             in
                             ( { model
@@ -854,14 +868,18 @@ handleCompletedTask model taskCompleted =
                 _ ->
                     ( model, Cmd.none )
 
-        LoadedRegistryUtxos registryUtxos ->
+        LoadedRegistryUtxos ( registryUtxos, contingencyUtxo ) ->
             case model.treasuryManagement of
-                TreasuryLoading ({ scopes } as loadingTreasury) ->
+                TreasuryLoading ({ scopes, contingency } as loadingTreasury) ->
                     -- If all UTxOs have been loaded (registry and scope)
                     -- then we can convert into a LoadedTreasury
                     ( { model
                         | treasuryManagement =
-                            TreasuryLoading { loadingTreasury | scopes = setRegistryUtxos registryUtxos scopes }
+                            TreasuryLoading
+                                { loadingTreasury
+                                    | scopes = setRegistryUtxos registryUtxos scopes
+                                    , contingency = { contingency | registryUtxo = RemoteData.Success contingencyUtxo }
+                                }
                       }
                         |> upgradeIfTreasuryLoadingFinished
                     , Cmd.none
@@ -870,14 +888,18 @@ handleCompletedTask model taskCompleted =
                 _ ->
                     ( model, Cmd.none )
 
-        LoadedTreasuriesUtxos treasuriesUtxos ->
+        LoadedTreasuriesUtxos ( treasuriesUtxos, contingencyUtxos ) ->
             case model.treasuryManagement of
-                TreasuryLoading ({ scopes } as loadingTreasury) ->
+                TreasuryLoading ({ scopes, contingency } as loadingTreasury) ->
                     -- If all UTxOs have been loaded (registry and scope)
                     -- then we can convert into a LoadedTreasury
                     ( { model
                         | treasuryManagement =
-                            TreasuryLoading { loadingTreasury | scopes = setTreasuryUtxos treasuriesUtxos scopes }
+                            TreasuryLoading
+                                { loadingTreasury
+                                    | scopes = setTreasuryUtxos treasuriesUtxos scopes
+                                    , contingency = { contingency | treasuryUtxos = RemoteData.Success contingencyUtxos }
+                                }
                       }
                         |> upgradeIfTreasuryLoadingFinished
                     , Cmd.none
@@ -909,7 +931,7 @@ setTreasuryUtxos treasuryUtxos { ledger, consensus, mercenaries, marketing } =
 Also apply the Sundae treasuy contracts with the now known paramaters.
 -}
 setPragmaUtxo : PlutusScript -> OutputReference -> Output -> LoadingTreasury -> Result String TreasuryManagement
-setPragmaUtxo unappliedSundaeTreasuryScript ref output loading =
+setPragmaUtxo unappliedSundaeTreasuryScript ref output ({ contingency } as loading) =
     let
         scopes =
             case output.datumOption of
@@ -924,11 +946,15 @@ setPragmaUtxo unappliedSundaeTreasuryScript ref output loading =
                 _ ->
                     Err "The PRAGMA UTxO does not contain a valid datum"
 
+        contingencyUpdated =
+            { contingency | sundaeTreasuryScriptApplied = applySundaeTreasuryScript unappliedSundaeTreasuryScript loading.contingency }
+
         treasuryLoading okScopes =
             TreasuryLoading
                 { loading
                     | rootUtxo = RemoteData.Success ( ref, output )
                     , scopes = okScopes
+                    , contingency = contingencyUpdated
                 }
     in
     Result.map treasuryLoading scopes
@@ -997,13 +1023,13 @@ applySundaeTreasuryScript unappliedScript scope =
 upgradeIfTreasuryLoadingFinished : Model -> Model
 upgradeIfTreasuryLoadingFinished model =
     case model.treasuryManagement of
-        TreasuryLoading { rootUtxo, scopes } ->
-            case ( rootUtxo, upgradeScopesIfLoadingFinished scopes ) of
-                ( RemoteData.Success ( ref, output ), Just loadedScopes ) ->
+        TreasuryLoading { rootUtxo, scopes, contingency } ->
+            case ( rootUtxo, upgradeScopesIfLoadingFinished scopes, upgradeScope contingency ) of
+                ( RemoteData.Success ( ref, output ), Just loadedScopes, Just contingencyScope ) ->
                     -- Upgrade the treasury management
                     -- AND the local state utxos
                     { model
-                        | treasuryManagement = TreasuryFullyLoaded { rootUtxo = ( ref, output ), scopes = loadedScopes }
+                        | treasuryManagement = TreasuryFullyLoaded { rootUtxo = ( ref, output ), scopes = loadedScopes, contingency = contingencyScope }
                         , localStateUtxos = addLoadedUtxos ( ref, output ) loadedScopes model.localStateUtxos
                     }
 
@@ -1025,10 +1051,10 @@ upgradeScopesIfLoadingFinished { ledger, consensus, mercenaries, marketing } =
 
 upgradeScope : LoadingScope -> Maybe Scope
 upgradeScope scope =
-    case ( scope.owner, ( scope.sundaeTreasuryScriptApplied, scope.registryUtxo, scope.treasuryUtxos ) ) of
-        ( Just owner, ( RemoteData.Success treasuryScriptApplied, RemoteData.Success registryUtxo, RemoteData.Success treasuryUtxos ) ) ->
+    case ( scope.sundaeTreasuryScriptApplied, scope.registryUtxo, scope.treasuryUtxos ) of
+        ( RemoteData.Success treasuryScriptApplied, RemoteData.Success registryUtxo, RemoteData.Success treasuryUtxos ) ->
             Just
-                { owner = owner
+                { owner = scope.owner |> Maybe.withDefault (MultisigScript.AnyOf [])
                 , permissionsScript = scope.permissionsScriptApplied
                 , sundaeTreasuryScript = treasuryScriptApplied
                 , registryUtxo = registryUtxo
@@ -1147,7 +1173,7 @@ viewTreasurySection treasuryManagement =
         TreasuryUnspecified ->
             div [] [ text "Treasury unspecified yet" ]
 
-        TreasuryLoading { rootUtxo, scopes } ->
+        TreasuryLoading { rootUtxo, scopes, contingency } ->
             div []
                 [ Html.p [] [ text "Loading treasury ... ", spinner ]
                 , viewLoadingRootUtxo rootUtxo
@@ -1155,9 +1181,10 @@ viewTreasurySection treasuryManagement =
                 , viewLoadingScope "consensus" scopes.consensus
                 , viewLoadingScope "mercenaries" scopes.mercenaries
                 , viewLoadingScope "marketing" scopes.marketing
+                , viewLoadingScope "contingency" contingency
                 ]
 
-        TreasuryFullyLoaded { rootUtxo, scopes } ->
+        TreasuryFullyLoaded { rootUtxo, scopes, contingency } ->
             let
                 rootUtxoRef =
                     Tuple.first rootUtxo
@@ -1169,6 +1196,7 @@ viewTreasurySection treasuryManagement =
                 , viewScope rootUtxoRef "consensus" scopes.consensus
                 , viewScope rootUtxoRef "mercenaries" scopes.mercenaries
                 , viewScope rootUtxoRef "marketing" scopes.marketing
+                , viewScope rootUtxoRef "contingency" contingency
                 ]
 
 
