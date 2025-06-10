@@ -806,6 +806,7 @@ handleCompletedTask model taskCompleted =
                                     List.filterMap extractAppliedTreasuryScriptHash loadingScopes
 
                                 loadingScopes =
+                                    -- TODO: add the contingency scope
                                     case treasuryManagement of
                                         TreasuryLoading { scopes } ->
                                             -- The list order is the same as the order of the scopes
@@ -983,7 +984,6 @@ applySundaeTreasuryScript unappliedScript scope =
                 , sweep = multisig
                 , fund = MultisigScript.AnyOf []
                 , disburse = multisig
-                , unregister = multisig
                 }
             , expiration = scope.expiration
             , payoutUpperbound = N.zero

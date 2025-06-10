@@ -52,18 +52,16 @@ type alias TreasuryPermissions =
     , sweep : MultisigScript
     , fund : MultisigScript
     , disburse : MultisigScript
-    , unregister : MultisigScript
     }
 
 
 treasuryPermissionsToData : TreasuryPermissions -> Data
-treasuryPermissionsToData { reorganize, sweep, fund, disburse, unregister } =
+treasuryPermissionsToData { reorganize, sweep, fund, disburse } =
     Data.Constr N.zero
         [ MultisigScript.toData reorganize
         , MultisigScript.toData sweep
         , MultisigScript.toData fund
         , MultisigScript.toData disburse
-        , MultisigScript.toData unregister
         ]
 
 
