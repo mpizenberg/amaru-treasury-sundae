@@ -41,10 +41,12 @@
                 flags: {
                     url: window.location.href,
                     db,
-                    pragmaScriptHash,
-                    registriesSeedUtxo,
-                    treasuryConfigExpiration: treasuryConfig.expiration,
                     blueprints: [sundaeBlueprint, amaruBlueprint],
+                    treasuryLoadingParams: {
+                        pragmaScriptHash,
+                        registriesSeedUtxo,
+                        treasuryConfigExpiration: treasuryConfig.expiration,
+                    },
                 },
             });
             // Initialize default ports for the app

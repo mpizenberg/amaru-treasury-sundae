@@ -40,10 +40,15 @@ import Types
 type alias Flags =
     { url : String
     , db : JD.Value
-    , pragmaScriptHash : String
+    , blueprints : List JD.Value
+    , treasuryLoadingParams : TreasuryLoadingParams
+    }
+
+
+type alias TreasuryLoadingParams =
+    { pragmaScriptHash : String
     , registriesSeedUtxo : { transactionId : String, outputIndex : Int }
     , treasuryConfigExpiration : Int
-    , blueprints : List JD.Value
     }
 
 
@@ -99,6 +104,7 @@ type Msg
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
       -- Treasury management
+    | StartTreasuryLoading
     | TreasuryMergingMsg TreasuryMergingMsg
       -- Task port
     | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
@@ -125,14 +131,15 @@ type alias Model =
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
     , scripts : Scripts
+    , treasuryLoadingParams : TreasuryLoadingParams
     , treasuryManagement : TreasuryManagement
     , treasuryAction : TreasuryAction
     , error : Maybe String
     }
 
 
-initialModel : JD.Value -> Scripts -> Model
-initialModel db scripts =
+initialModel : JD.Value -> Scripts -> TreasuryLoadingParams -> Model
+initialModel db scripts treasuryLoadingParams =
     { taskPool = ConcurrentTask.pool
     , db = db
     , page = Home
@@ -142,6 +149,7 @@ initialModel db scripts =
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
     , scripts = scripts
+    , treasuryLoadingParams = treasuryLoadingParams
     , treasuryManagement = TreasuryUnspecified
     , treasuryAction = NoTreasuryAction
     , error = Nothing
@@ -304,7 +312,7 @@ type MergeStatus
 
 
 init : Flags -> ( Model, Cmd Msg )
-init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, blueprints } =
+init { db, blueprints, treasuryLoadingParams } =
     let
         decodedBlueprints : List ScriptBlueprint
         decodedBlueprints =
@@ -341,115 +349,18 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
                     )
 
         model =
-            initialModel db scripts
-
-        -- Load Pragma UTxO
-        ( updatedTaskPool, loadPragmaUtxoCmd ) =
-            Api.retrieveAssetUtxo model.networkId (Bytes.fromHexUnchecked pragmaScriptHash) (Bytes.fromText "amaru scopes")
-                |> ConcurrentTask.mapError Debug.toString
-                |> ConcurrentTask.andThen (Api.retrieveOutput model.networkId)
-                |> ConcurrentTask.map LoadedPragmaUtxo
-                |> ConcurrentTask.attempt
-                    { pool = model.taskPool
-                    , send = sendTask
-                    , onComplete = OnTaskComplete
-                    }
-
-        loadingTreasuryResult =
-            initLoadingTreasury
-                model.scripts.scopePermissions
-                model.scripts.registryTrap
-                pragmaScriptHash
-                registriesSeedUtxo
-                treasuryConfigExpiration
-
-        loadRegistryUtxos : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
-        loadRegistryUtxos loadingScopes contingencyScope =
-            let
-                registryAssetName =
-                    Bytes.fromText "REGISTRY"
-
-                registryAssets =
-                    Scopes
-                        ( loadingScopes.ledger.registryNftPolicyId, registryAssetName )
-                        ( loadingScopes.consensus.registryNftPolicyId, registryAssetName )
-                        ( loadingScopes.mercenaries.registryNftPolicyId, registryAssetName )
-                        ( loadingScopes.marketing.registryNftPolicyId, registryAssetName )
-
-                contingencyAsset =
-                    ( contingencyScope.registryNftPolicyId, registryAssetName )
-
-                -- Query assets utxos
-                assetsUtxosTask : ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
-                assetsUtxosTask =
-                    Api.retrieveAssetsUtxos { db = db }
-                        model.networkId
-                        [ registryAssets.ledger
-                        , registryAssets.consensus
-                        , registryAssets.mercenaries
-                        , registryAssets.marketing
-                        , contingencyAsset
-                        ]
-
-                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
-                extractLoadedUtxos assetsUtxos =
-                    Result.map5 (\s1 s2 s3 s4 contingency -> ( Scopes s1 s2 s3 s4, contingency ))
-                        (extractRegistryUtxo registryAssets.ledger assetsUtxos)
-                        (extractRegistryUtxo registryAssets.consensus assetsUtxos)
-                        (extractRegistryUtxo registryAssets.mercenaries assetsUtxos)
-                        (extractRegistryUtxo registryAssets.marketing assetsUtxos)
-                        (extractRegistryUtxo contingencyAsset assetsUtxos)
-                        |> ConcurrentTask.fromResult
-
-                extractRegistryUtxo ( policyId, assetName ) multiAsset =
-                    case MultiAsset.get policyId assetName multiAsset of
-                        Nothing ->
-                            Err <| "Missing asset: " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
-
-                        Just refDict ->
-                            case Dict.Any.toList refDict of
-                                [] ->
-                                    Err <| "Missing asset: " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
-
-                                [ utxo ] ->
-                                    Ok utxo
-
-                                _ ->
-                                    Err <| "Asset in more than 1 outputs! : " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
-            in
-            ConcurrentTask.andThen extractLoadedUtxos assetsUtxosTask
-
-        attemptLoadRegistryUtxosTask loadingScopes contingencyScope =
-            loadRegistryUtxos loadingScopes contingencyScope
-                |> ConcurrentTask.map LoadedRegistryUtxos
-                |> ConcurrentTask.attempt
-                    { pool = updatedTaskPool
-                    , send = sendTask
-                    , onComplete = OnTaskComplete
-                    }
+            initialModel db scripts treasuryLoadingParams
     in
-    case ( blueprintError, loadingTreasuryResult ) of
-        ( Nothing, Ok loadingTreasury ) ->
-            let
-                ( updatedAgainTaskPool, loadRegistryUtxosCmd ) =
-                    attemptLoadRegistryUtxosTask loadingTreasury.scopes loadingTreasury.contingency
-            in
-            ( { model
-                | taskPool = updatedAgainTaskPool
-                , treasuryManagement = TreasuryLoading loadingTreasury
-              }
+    case blueprintError of
+        Nothing ->
+            ( model
             , Cmd.batch
                 [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
                 , Api.loadProtocolParams model.networkId GotNetworkParams
-                , loadPragmaUtxoCmd
-                , loadRegistryUtxosCmd
                 ]
             )
 
-        ( Just error, _ ) ->
-            ( { model | error = Just error }, Cmd.none )
-
-        ( _, Err error ) ->
+        Just error ->
             ( { model | error = Just error }, Cmd.none )
 
 
@@ -502,6 +413,9 @@ update msg model =
         GotNetworkParams (Ok params) ->
             ( { model | protocolParams = params }, Cmd.none )
 
+        StartTreasuryLoading ->
+            startTreasuryLoading model
+
         TreasuryMergingMsg submsg ->
             handleTreasuryMergingMsg submsg model
 
@@ -550,6 +464,121 @@ handleWalletMsg value model =
         -- TODO: handle the error case
         _ ->
             ( model, Cmd.none )
+
+
+
+-- Loading the Treasury
+
+
+startTreasuryLoading : Model -> ( Model, Cmd Msg )
+startTreasuryLoading model =
+    let
+        { pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration } =
+            model.treasuryLoadingParams
+
+        -- Load Pragma UTxO
+        ( updatedTaskPool, loadPragmaUtxoCmd ) =
+            Api.retrieveAssetUtxo model.networkId (Bytes.fromHexUnchecked pragmaScriptHash) (Bytes.fromText "amaru scopes")
+                |> ConcurrentTask.mapError Debug.toString
+                |> ConcurrentTask.andThen (Api.retrieveOutput model.networkId)
+                |> ConcurrentTask.map LoadedPragmaUtxo
+                |> ConcurrentTask.attempt
+                    { pool = model.taskPool
+                    , send = sendTask
+                    , onComplete = OnTaskComplete
+                    }
+
+        loadingTreasuryResult =
+            initLoadingTreasury
+                model.scripts.scopePermissions
+                model.scripts.registryTrap
+                pragmaScriptHash
+                registriesSeedUtxo
+                treasuryConfigExpiration
+
+        loadRegistryUtxos : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
+        loadRegistryUtxos loadingScopes contingencyScope =
+            let
+                registryAssetName =
+                    Bytes.fromText "REGISTRY"
+
+                registryAssets =
+                    Scopes
+                        ( loadingScopes.ledger.registryNftPolicyId, registryAssetName )
+                        ( loadingScopes.consensus.registryNftPolicyId, registryAssetName )
+                        ( loadingScopes.mercenaries.registryNftPolicyId, registryAssetName )
+                        ( loadingScopes.marketing.registryNftPolicyId, registryAssetName )
+
+                contingencyAsset =
+                    ( contingencyScope.registryNftPolicyId, registryAssetName )
+
+                -- Query assets utxos
+                assetsUtxosTask : ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
+                assetsUtxosTask =
+                    Api.retrieveAssetsUtxos { db = model.db }
+                        model.networkId
+                        [ registryAssets.ledger
+                        , registryAssets.consensus
+                        , registryAssets.mercenaries
+                        , registryAssets.marketing
+                        , contingencyAsset
+                        ]
+
+                extractLoadedUtxos : MultiAsset (Utxo.RefDict Output) -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
+                extractLoadedUtxos assetsUtxos =
+                    Result.map5 (\s1 s2 s3 s4 contingency -> ( Scopes s1 s2 s3 s4, contingency ))
+                        (extractRegistryUtxo registryAssets.ledger assetsUtxos)
+                        (extractRegistryUtxo registryAssets.consensus assetsUtxos)
+                        (extractRegistryUtxo registryAssets.mercenaries assetsUtxos)
+                        (extractRegistryUtxo registryAssets.marketing assetsUtxos)
+                        (extractRegistryUtxo contingencyAsset assetsUtxos)
+                        |> ConcurrentTask.fromResult
+
+                extractRegistryUtxo ( policyId, assetName ) multiAsset =
+                    case MultiAsset.get policyId assetName multiAsset of
+                        Nothing ->
+                            Err <| "Missing asset: " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
+
+                        Just refDict ->
+                            case Dict.Any.toList refDict of
+                                [] ->
+                                    Err <| "Missing asset: " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
+
+                                [ utxo ] ->
+                                    Ok utxo
+
+                                _ ->
+                                    Err <| "Asset in more than 1 outputs! : " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
+            in
+            ConcurrentTask.andThen extractLoadedUtxos assetsUtxosTask
+
+        attemptLoadRegistryUtxosTask loadingScopes contingencyScope =
+            loadRegistryUtxos loadingScopes contingencyScope
+                |> ConcurrentTask.map LoadedRegistryUtxos
+                |> ConcurrentTask.attempt
+                    { pool = updatedTaskPool
+                    , send = sendTask
+                    , onComplete = OnTaskComplete
+                    }
+    in
+    case loadingTreasuryResult of
+        Ok loadingTreasury ->
+            let
+                ( updatedAgainTaskPool, loadRegistryUtxosCmd ) =
+                    attemptLoadRegistryUtxosTask loadingTreasury.scopes loadingTreasury.contingency
+            in
+            ( { model
+                | taskPool = updatedAgainTaskPool
+                , treasuryManagement = TreasuryLoading loadingTreasury
+              }
+            , Cmd.batch
+                [ loadPragmaUtxoCmd
+                , loadRegistryUtxosCmd
+                ]
+            )
+
+        Err error ->
+            ( { model | error = Just error }, Cmd.none )
 
 
 
@@ -1221,7 +1250,11 @@ viewTreasurySection : TreasuryManagement -> Html Msg
 viewTreasurySection treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
-            div [] [ text "Treasury unspecified yet" ]
+            div []
+                [ Html.p [] [ Html.text "Treasury unspecified yet" ]
+                , Html.button [ onClick StartTreasuryLoading ]
+                    [ Html.text "Load pre-initialized treasury" ]
+                ]
 
         TreasuryLoading { rootUtxo, scopes, contingency } ->
             div []
