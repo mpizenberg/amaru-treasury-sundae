@@ -31,6 +31,8 @@ import Natural as N exposing (Natural)
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
+import Task
+import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
 import Types
 
@@ -355,15 +357,18 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
         loadRegistryUtxos : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
         loadRegistryUtxos loadingScopes contingencyScope =
             let
+                registryAssetName =
+                    Bytes.fromText "REGISTRY"
+
                 registryAssets =
                     Scopes
-                        ( loadingScopes.ledger.registryNftPolicyId, Bytes.fromText "ledger" )
-                        ( loadingScopes.consensus.registryNftPolicyId, Bytes.fromText "consensus" )
-                        ( loadingScopes.mercenaries.registryNftPolicyId, Bytes.fromText "mercenaries" )
-                        ( loadingScopes.marketing.registryNftPolicyId, Bytes.fromText "marketing" )
+                        ( loadingScopes.ledger.registryNftPolicyId, registryAssetName )
+                        ( loadingScopes.consensus.registryNftPolicyId, registryAssetName )
+                        ( loadingScopes.mercenaries.registryNftPolicyId, registryAssetName )
+                        ( loadingScopes.marketing.registryNftPolicyId, registryAssetName )
 
                 contingencyAsset =
-                    ( contingencyScope.registryNftPolicyId, Bytes.fromText "contingency" )
+                    ( contingencyScope.registryNftPolicyId, registryAssetName )
 
                 -- Query assets utxos
                 assetsUtxosTask : ConcurrentTask String (MultiAsset (Utxo.RefDict Output))
@@ -545,6 +550,7 @@ handleWalletMsg value model =
 type TreasuryMergingMsg
     = StartMergeUtxos String Scope OutputReference
     | BuildMergeTransaction (List (Bytes CredentialHash))
+    | BuildMergeTransactionWithTime (List (Bytes CredentialHash)) Posix
     | SignMergeTransaction Transaction
     | SubmitMergeTransaction Transaction
     | CancelMergeAction
@@ -557,7 +563,12 @@ handleTreasuryMergingMsg msg model =
             handleStartMergeUtxos scopeName scope rootUtxo model
 
         BuildMergeTransaction requiredSigners ->
-            handleBuildMergeTransaction model requiredSigners
+            ( model
+            , Task.perform (TreasuryMergingMsg << BuildMergeTransactionWithTime requiredSigners) Time.now
+            )
+
+        BuildMergeTransactionWithTime requiredSigners currentTime ->
+            handleBuildMergeTransaction model requiredSigners currentTime
 
         SignMergeTransaction transaction ->
             handleSignMergeTransaction transaction model
@@ -590,17 +601,41 @@ handleStartMergeUtxos scopeName scope rootUtxo model =
         )
 
 
-handleBuildMergeTransaction : Model -> List (Bytes CredentialHash) -> ( Model, Cmd Msg )
-handleBuildMergeTransaction model requiredSigners =
+handleBuildMergeTransaction : Model -> List (Bytes CredentialHash) -> Posix -> ( Model, Cmd Msg )
+handleBuildMergeTransaction model requiredSigners currentTime =
     case ( model.treasuryAction, model.connectedWallet ) of
         ( MergeTreasuryUtxos mergeState, Just wallet ) ->
             let
-                mergeTxIntents =
-                    mergeUtxos model.networkId mergeState.scope requiredSigners
+                _ =
+                    Debug.log "currentTime" currentTime
 
-                -- TODO: update TxOtherInfo
+                slotConfig =
+                    case model.networkId of
+                        Mainnet ->
+                            Uplc.slotConfigMainnet
+
+                        Testnet ->
+                            Uplc.slotConfigPreview
+
+                slot10sAgo =
+                    (Time.posixToMillis currentTime - 1000 * 10)
+                        |> Time.millisToPosix
+                        |> Uplc.timeToSlot slotConfig
+
+                slotIn36Hours =
+                    (Time.posixToMillis currentTime + 1000 * 3600 * 36)
+                        |> Time.millisToPosix
+                        |> Uplc.timeToSlot slotConfig
+
+                validityRange =
+                    Just { start = N.toInt slot10sAgo, end = slotIn36Hours }
+                        |> Debug.log "validityRange"
+
+                ( mergeTxIntents, mergeOtherInfo ) =
+                    mergeUtxos model.networkId mergeState.rootUtxo mergeState.scope requiredSigners validityRange
+
                 txOtherInfo =
-                    [ TxIntent.TxReferenceInput mergeState.rootUtxo ]
+                    TxIntent.TxReferenceInput mergeState.rootUtxo :: mergeOtherInfo
 
                 feeSource =
                     Cip30.walletChangeAddress wallet
@@ -674,20 +709,17 @@ handleSubmitMergeTransaction tx model =
 REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
 
 -}
-mergeUtxos : NetworkId -> Scope -> List (Bytes CredentialHash) -> List TxIntent
-mergeUtxos networkId scope requiredSigners =
+mergeUtxos : NetworkId -> OutputReference -> Scope -> List (Bytes CredentialHash) -> Maybe { start : Int, end : Natural } -> ( List TxIntent, List TxOtherInfo )
+mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
     let
         utxos =
             Dict.Any.toList scope.treasuryUtxos
-
-        treasuryScriptBytes =
-            Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
 
         requiredWithdrawals =
             -- Withdrawal with the scope owner script
             [ { stakeCredential =
                     { networkId = networkId
-                    , stakeCredential = ScriptHash ownerScriptHash
+                    , stakeCredential = ScriptHash permissionsScriptHash
                     }
               , amount = N.zero
               , scriptWitness =
@@ -703,11 +735,8 @@ mergeUtxos networkId scope requiredSigners =
               }
             ]
 
-        ( ownerScriptHash, permissionsScript ) =
+        ( permissionsScriptHash, permissionsScript ) =
             scope.permissionsScript
-
-        receivers value =
-            [ TxIntent.SendTo scopeTreasuryAddress value ]
 
         scopeTreasuryAddress =
             case utxos of
@@ -717,7 +746,17 @@ mergeUtxos networkId scope requiredSigners =
                 _ ->
                     Debug.todo "impossible to have utxos = []"
     in
-    Treasury.reorganize treasuryScriptBytes requiredSigners requiredWithdrawals utxos receivers
+    Treasury.reorganize
+        { treasuryScriptBytes =
+            Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
+        , registryOutputRef = Tuple.first scope.registryUtxo
+        , additionalOutputRefs = [ rootUtxo ]
+        , requiredSigners = requiredSigners
+        , validityRange = validityRange
+        , requiredWithdrawals = requiredWithdrawals
+        , spentUtxos = utxos
+        , receivers = \value -> [ TxIntent.SendTo scopeTreasuryAddress value ]
+        }
 
 
 
@@ -729,8 +768,8 @@ mergeUtxos networkId scope requiredSigners =
 REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
 
 -}
-disburse : NetworkId -> Scope -> List (Bytes CredentialHash) -> OutputReference -> (Value -> List TxIntent) -> Value -> Result String (List TxIntent)
-disburse networkId scope requiredSigners utxoRef receivers value =
+disburse : NetworkId -> Scope -> List (Bytes CredentialHash) -> Maybe { start : Int, end : Natural } -> OutputReference -> (Value -> List TxIntent) -> Value -> Result String ( List TxIntent, List TxOtherInfo )
+disburse networkId scope requiredSigners validityRange utxoRef receivers value =
     case Dict.Any.get utxoRef scope.treasuryUtxos of
         Nothing ->
             Err <| "The selected UTxO isn’t in the known list of UTxOs for this scope: " ++ Debug.toString utxoRef
@@ -740,10 +779,12 @@ disburse networkId scope requiredSigners utxoRef receivers value =
                 spendConfig : SpendConfig
                 spendConfig =
                     { treasuryScriptBytes = Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
+                    , registryOutputRef = Tuple.first scope.registryUtxo
                     , requiredSigners = requiredSigners
                     , requiredWithdrawals = requiredWithdrawals
                     , spentInputRef = utxoRef
                     , spentOutput = spentOutput
+                    , validityRange = validityRange
                     }
 
                 requiredWithdrawals =

@@ -5,7 +5,7 @@ import Cardano.Address as Address exposing (Credential(..), CredentialHash, Netw
 import Cardano.Data as Data
 import Cardano.MultiAsset as MultiAsset
 import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
-import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxIntent)
+import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
@@ -51,10 +51,12 @@ initialWithdrawal networkId treasuryScriptHash treasuryScriptBytes amount =
 
 type alias SpendConfig =
     { treasuryScriptBytes : Bytes ScriptCbor
+    , registryOutputRef : OutputReference
     , requiredSigners : List (Bytes CredentialHash)
     , requiredWithdrawals : List WithdrawalIntent
     , spentInputRef : OutputReference
     , spentOutput : Output
+    , validityRange : Maybe { start : Int, end : Natural }
     }
 
 
@@ -78,7 +80,7 @@ If not, the caller decides which of the signers are required
 to satisfy the sweep multisig in the treasury configuration.
 
 -}
-sweepBackToCardanoTreasury : SpendConfig -> List TxIntent
+sweepBackToCardanoTreasury : SpendConfig -> ( List TxIntent, List TxOtherInfo )
 sweepBackToCardanoTreasury ({ spentOutput } as config) =
     let
         donation : Value -> List TxIntent
@@ -107,51 +109,62 @@ WARNING: There cannot be 2 withdrawals for the same credential,
 so if spending multiple utxos, make sure you only add the withdrawals once.
 
 -}
-disburse : SpendConfig -> (Value -> List TxIntent) -> Value -> List TxIntent
+disburse : SpendConfig -> (Value -> List TxIntent) -> Value -> ( List TxIntent, List TxOtherInfo )
 disburse config receivers value =
     spend config (Disburse value) receivers value
+
+
+{-| Config for reorganizing the treasury UTxOs.
+-}
+type alias ReorganizeConfig =
+    { treasuryScriptBytes : Bytes ScriptCbor
+    , registryOutputRef : OutputReference
+    , additionalOutputRefs : List OutputReference
+    , requiredSigners : List (Bytes CredentialHash)
+    , validityRange : Maybe { start : Int, end : Natural }
+    , requiredWithdrawals : List WithdrawalIntent
+    , spentUtxos : List ( OutputReference, Output )
+    , receivers : Value -> List TxIntent
+    }
 
 
 {-| Reorganize UTxOs of the treasury.
 Can be used to merge or split the treasury UTxOs.
 
-The caller is responsible to list the requiredSigners.
+The caller is responsible to list the requiredSigners, and the validity range.
 
 -}
-reorganize :
-    Bytes ScriptCbor
-    -> List (Bytes CredentialHash)
-    -> List WithdrawalIntent
-    -> List ( OutputReference, Output )
-    -> (Value -> List TxIntent)
-    -> List TxIntent
-reorganize treasuryScriptBytes requiredSigners requiredWithdrawals spentUtxos receivers =
+reorganize : ReorganizeConfig -> ( List TxIntent, List TxOtherInfo )
+reorganize { treasuryScriptBytes, registryOutputRef, additionalOutputRefs, requiredSigners, validityRange, requiredWithdrawals, spentUtxos, receivers } =
     let
-        spendings : List TxIntent
-        spendings =
+        -- (List TxIntent, List TxOtherInfo)
+        ( spendIntents, spendOthers ) =
             -- Spend all UTxOs, and do not (yet) create the new outputs
             spentUtxos
-                |> List.concatMap
+                |> List.map
                     (\( spentInputRef, spentOutput ) ->
-                        spend (SpendConfig treasuryScriptBytes requiredSigners requiredWithdrawals spentInputRef spentOutput)
+                        spend (SpendConfig treasuryScriptBytes registryOutputRef requiredSigners requiredWithdrawals spentInputRef spentOutput validityRange)
                             SweepTreasury
                             (\_ -> [])
                             spentOutput.amount
                     )
+                |> List.foldr (\( intents, others ) ( accIntents, accOthers ) -> ( intents ++ accIntents, others ++ accOthers )) ( [], [] )
 
         totalSpent =
             spentUtxos
                 |> List.map (\( _, spentOutput ) -> spentOutput.amount)
                 |> Value.sum
     in
-    spendings ++ receivers totalSpent
+    ( spendIntents ++ receivers totalSpent
+    , spendOthers ++ List.map TxIntent.TxReferenceInput additionalOutputRefs
+    )
 
 
 {-| Helper function to spend a UTxO of the treasury
 and return the unspent amount into it.
 -}
-spend : SpendConfig -> TreasurySpendRedeemer -> (Value -> List TxIntent) -> Value -> List TxIntent
-spend { treasuryScriptBytes, requiredSigners, requiredWithdrawals, spentInputRef, spentOutput } redeemer receivers value =
+spend : SpendConfig -> TreasurySpendRedeemer -> (Value -> List TxIntent) -> Value -> ( List TxIntent, List TxOtherInfo )
+spend { treasuryScriptBytes, registryOutputRef, requiredSigners, requiredWithdrawals, spentInputRef, spentOutput, validityRange } redeemer receivers value =
     let
         plutusScriptWitness : Witness.PlutusScript
         plutusScriptWitness =
@@ -177,9 +190,23 @@ spend { treasuryScriptBytes, requiredSigners, requiredWithdrawals, spentInputRef
 
         additionalWithdrawals =
             List.map TxIntent.WithdrawRewards requiredWithdrawals
+
+        otherInfoIntent =
+            case validityRange of
+                Nothing ->
+                    [ TxIntent.TxReferenceInput registryOutputRef ]
+
+                Just range ->
+                    [ TxIntent.TxReferenceInput registryOutputRef
+                    , TxIntent.TxTimeValidityRange range
+                    ]
     in
     if leftOver == Value.zero then
-        spendIntent :: receivers value ++ additionalWithdrawals
+        ( spendIntent :: receivers value ++ additionalWithdrawals
+        , otherInfoIntent
+        )
 
     else
-        spendIntent :: recreatedOutput :: receivers value ++ additionalWithdrawals
+        ( spendIntent :: recreatedOutput :: receivers value ++ additionalWithdrawals
+        , otherInfoIntent
+        )
