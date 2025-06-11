@@ -124,9 +124,6 @@ type alias Model =
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
-    , pragmaScriptHash : Bytes CredentialHash
-    , registriesSeedUtxo : OutputReference
-    , treasuryConfigExpiration : Natural
     , scripts : Scripts
     , treasuryManagement : TreasuryManagement
     , treasuryAction : TreasuryAction
@@ -134,8 +131,8 @@ type alias Model =
     }
 
 
-initialModel : JD.Value -> String -> ( String, Int ) -> Int -> Scripts -> Model
-initialModel db pragmaScriptHash ( txId, outputIndex ) expiration scripts =
+initialModel : JD.Value -> Scripts -> Model
+initialModel db scripts =
     { taskPool = ConcurrentTask.pool
     , db = db
     , page = Home
@@ -144,9 +141,6 @@ initialModel db pragmaScriptHash ( txId, outputIndex ) expiration scripts =
     , discoveredWallets = []
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
-    , pragmaScriptHash = Bytes.fromHexUnchecked pragmaScriptHash
-    , registriesSeedUtxo = OutputReference (Bytes.fromHexUnchecked txId) outputIndex
-    , treasuryConfigExpiration = N.fromSafeInt expiration
     , scripts = scripts
     , treasuryManagement = TreasuryUnspecified
     , treasuryAction = NoTreasuryAction
@@ -172,15 +166,27 @@ type TreasuryManagement
 
 
 type alias LoadingTreasury =
-    { rootUtxo : RemoteData String ( OutputReference, Output )
+    { pragmaScriptHash : Bytes CredentialHash
+    , registriesSeedUtxo : OutputReference
+    , treasuryConfigExpiration : Natural
+    , rootUtxo : RemoteData String ( OutputReference, Output )
     , scopes : Scopes LoadingScope
     , contingency : LoadingScope
     }
 
 
-initLoadingTreasury : PlutusScript -> Bytes CredentialHash -> PlutusScript -> OutputReference -> Natural -> Result String LoadingTreasury
-initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedRegistryTrapScript registriesSeedUtxo treasuryConfigExpiration =
+initLoadingTreasury : PlutusScript -> PlutusScript -> String -> { transactionId : String, outputIndex : Int } -> Int -> Result String LoadingTreasury
+initLoadingTreasury unappliedScopePermissionScript unappliedRegistryTrapScript pragmaScriptHashHex { transactionId, outputIndex } expiration =
     let
+        pragmaScriptHash =
+            Bytes.fromHexUnchecked pragmaScriptHashHex
+
+        registriesSeedUtxo =
+            OutputReference (Bytes.fromHexUnchecked transactionId) outputIndex
+
+        treasuryConfigExpiration =
+            N.fromSafeInt expiration
+
         initLoadingScopeWithIndex index =
             initLoadingScope
                 unappliedScopePermissionScript
@@ -191,7 +197,10 @@ initLoadingTreasury unappliedScopePermissionScript pragmaScriptHash unappliedReg
                 index
 
         loadingTreasury ledger consensus mercenaries marketing contingency =
-            { rootUtxo = RemoteData.Loading
+            { pragmaScriptHash = pragmaScriptHash
+            , registriesSeedUtxo = registriesSeedUtxo
+            , treasuryConfigExpiration = treasuryConfigExpiration
+            , rootUtxo = RemoteData.Loading
             , scopes = Scopes ledger consensus mercenaries marketing
             , contingency = contingency
             }
@@ -332,11 +341,11 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
                     )
 
         model =
-            initialModel db pragmaScriptHash ( registriesSeedUtxo.transactionId, registriesSeedUtxo.outputIndex ) treasuryConfigExpiration scripts
+            initialModel db scripts
 
         -- Load Pragma UTxO
         ( updatedTaskPool, loadPragmaUtxoCmd ) =
-            Api.retrieveAssetUtxo model.networkId model.pragmaScriptHash (Bytes.fromText "amaru scopes")
+            Api.retrieveAssetUtxo model.networkId (Bytes.fromHexUnchecked pragmaScriptHash) (Bytes.fromText "amaru scopes")
                 |> ConcurrentTask.mapError Debug.toString
                 |> ConcurrentTask.andThen (Api.retrieveOutput model.networkId)
                 |> ConcurrentTask.map LoadedPragmaUtxo
@@ -349,10 +358,10 @@ init { db, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, bluep
         loadingTreasuryResult =
             initLoadingTreasury
                 model.scripts.scopePermissions
-                model.pragmaScriptHash
                 model.scripts.registryTrap
-                model.registriesSeedUtxo
-                model.treasuryConfigExpiration
+                pragmaScriptHash
+                registriesSeedUtxo
+                treasuryConfigExpiration
 
         loadRegistryUtxos : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
         loadRegistryUtxos loadingScopes contingencyScope =
