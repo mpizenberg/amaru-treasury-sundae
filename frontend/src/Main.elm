@@ -4,15 +4,15 @@ import Api exposing (ProtocolParams)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
-import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
+import Cardano.Address as Address exposing (Address, Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.CoinSelection as CoinSelection
 import Cardano.Data as Data exposing (Data)
 import Cardano.MultiAsset as MultiAsset exposing (MultiAsset, PolicyId)
 import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
-import Cardano.Transaction exposing (Transaction)
+import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxExamples exposing (prettyTx)
-import Cardano.TxIntent as TxIntent exposing (TxFinalizationError, TxFinalized, TxIntent, TxOtherInfo)
+import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalizationError, TxFinalized, TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
@@ -24,6 +24,7 @@ import Html exposing (Html, div, text)
 import Html.Attributes as HA exposing (height, src)
 import Html.Events exposing (onClick)
 import Http
+import Integer as I
 import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
@@ -163,6 +164,7 @@ type Page
 type alias Scripts =
     { sundaeTreasury : PlutusScript
     , registryTrap : PlutusScript
+    , scopesTrap : PlutusScript
     , scopePermissions : PlutusScript
     }
 
@@ -265,6 +267,432 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
         registryScriptResult
 
 
+setupAmaruTreasury : Model -> Cip30.Wallet -> Scopes MultisigScript -> Result String ( SetupTxs, LoadedTreasury )
+setupAmaruTreasury model connectedWallet scopeOwners =
+    setupAmaruScopes model connectedWallet scopeOwners
+        |> Result.andThen
+            (\( ( scopesSeedUtxo, setupScopesTx ), ( scopesTrapScriptHash, scopesTrapScript ) ) ->
+                setupPermissions model connectedWallet ( setupScopesTx, scopesTrapScriptHash, scopesTrapScript )
+                    |> Result.andThen
+                        (\( setupPermissionsTx, scopesPermissions, contingencyPermissions ) ->
+                            pickSeedUtxo model.localStateUtxos (Cip30.walletChangeAddress connectedWallet) (N.fromSafeInt 10000000)
+                                |> Result.andThen
+                                    (\( registriesSeedRef, registriesSeedOutput ) ->
+                                        setupRegistries model.scripts.registryTrap registriesSeedRef
+                                            |> Result.andThen
+                                                (\( scopesRegistries, contingencyRegistry ) ->
+                                                    setupLastStep model
+                                                        connectedWallet
+                                                        { txs =
+                                                            { scopes = setupScopesTx
+                                                            , permissions = setupPermissionsTx
+                                                            }
+                                                        , rootUtxo = scopesSeedUtxo
+                                                        , scopeOwners = scopeOwners
+                                                        , scopesPermissions = scopesPermissions
+                                                        , scopesRegistries = scopesRegistries
+                                                        , contingencyPermissions = contingencyPermissions
+                                                        , contingencyRegistry = contingencyRegistry
+                                                        , registriesSeedUtxo = ( registriesSeedRef, registriesSeedOutput )
+                                                        }
+                                                )
+                                    )
+                        )
+            )
+
+
+type alias LastStepParams =
+    { txs :
+        { scopes : TxFinalized
+        , permissions : TxFinalized
+        }
+    , rootUtxo : ( OutputReference, Output )
+    , scopeOwners : Scopes MultisigScript
+    , scopesPermissions : Scopes ( Bytes CredentialHash, PlutusScript )
+    , scopesRegistries : Scopes ( Bytes CredentialHash, PlutusScript )
+    , contingencyPermissions : ( Bytes CredentialHash, PlutusScript )
+    , contingencyRegistry : ( Bytes CredentialHash, PlutusScript )
+    , registriesSeedUtxo : ( OutputReference, Output )
+    }
+
+
+type alias SetupTxs =
+    { scopes : TxFinalized
+    , permissions : TxFinalized
+    , registries : TxFinalized
+    }
+
+
+setupLastStep : Model -> Cip30.Wallet -> LastStepParams -> Result String ( SetupTxs, LoadedTreasury )
+setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, registriesSeedUtxo } =
+    let
+        scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
+        scopesTreasuryScriptsResult =
+            scopesToResult <|
+                scopesMap2 (\( registryHash, _ ) ( permissionsHash, _ ) -> setupTreasury model registryHash permissionsHash)
+                    scopesRegistries
+                    scopesPermissions
+
+        scopesTreasuriesResult : Result String (Scopes ( Bytes CredentialHash, PlutusScript ))
+        scopesTreasuriesResult =
+            Result.map (scopesMap (\script -> ( Script.hash <| Script.Plutus script, script ))) scopesTreasuryScriptsResult
+
+        contingencyTreasuryResult : Result String ( Bytes CredentialHash, PlutusScript )
+        contingencyTreasuryResult =
+            setupTreasury model (Tuple.first contingencyRegistry) (Tuple.first contingencyPermissions)
+                |> Result.map (\script -> ( Script.hash <| Script.Plutus script, script ))
+
+        createRegistriesTx : Scopes (Bytes CredentialHash) -> Bytes CredentialHash -> Result String TxFinalized
+        createRegistriesTx scopesTreasuryHashes contingencyTreasuryHash =
+            let
+                walletAddress =
+                    Cip30.walletChangeAddress connectedWallet
+
+                -- Re-apply both the scopes and permissions Txs to local state before building the registry Tx
+                { updatedState } =
+                    TxIntent.updateLocalState (Transaction.computeTxId txs.scopes.tx) txs.scopes.tx model.localStateUtxos
+                        |> .updatedState
+                        |> TxIntent.updateLocalState (Transaction.computeTxId txs.permissions.tx) txs.permissions.tx
+
+                twoAda =
+                    Value.onlyLovelace <| N.fromSafeInt 2000000
+
+                registryDatum treasuryHash =
+                    Types.registryToData
+                        { treasury = Address.ScriptHash treasuryHash
+                        , vendor = Address.ScriptHash <| Bytes.dummy 28 ""
+                        }
+
+                mintIntent treasuryHash ( registryHash, registryScript ) =
+                    -- Spend 2 ada from the wallet
+                    [ TxIntent.Spend <|
+                        FromWallet
+                            { address = walletAddress
+                            , value = twoAda
+                            , guaranteedUtxos = [ Tuple.first registriesSeedUtxo ]
+                            }
+
+                    -- Mint the registry token
+                    , TxIntent.MintBurn
+                        { policyId = registryHash
+                        , assets = Bytes.Map.singleton Types.registryTokenName I.one
+                        , scriptWitness =
+                            Witness.Plutus
+                                { script = ( Script.plutusVersion registryScript, Witness.ByValue <| Script.cborWrappedBytes registryScript )
+                                , redeemerData = \_ -> Data.List [] -- unused
+                                , requiredSigners = [] -- no required signer for minting
+                                }
+                        }
+
+                    -- Send 2 ada + policyId/assetName + scopesDatum to the scopes trap address
+                    , TxIntent.SendToOutput <|
+                        { address = Address.script model.networkId registryHash
+                        , amount = Value.add twoAda <| Value.onlyToken registryHash Types.registryTokenName N.one
+                        , datumOption = Just <| Utxo.datumValueFromData <| registryDatum treasuryHash
+                        , referenceScript = Nothing
+                        }
+                    ]
+            in
+            [ mintIntent scopesTreasuryHashes.ledger scopesRegistries.ledger
+            , mintIntent scopesTreasuryHashes.consensus scopesRegistries.consensus
+            , mintIntent scopesTreasuryHashes.mercenaries scopesRegistries.mercenaries
+            , mintIntent scopesTreasuryHashes.marketing scopesRegistries.marketing
+            , mintIntent contingencyTreasuryHash contingencyRegistry
+            ]
+                |> List.concat
+                |> TxIntent.finalize updatedState []
+                |> Result.mapError TxIntent.errorToString
+
+        scopesResult : Transaction -> Scopes ( Bytes CredentialHash, PlutusScript ) -> Result String (Scopes Scope)
+        scopesResult registryTx scopesTreasuries =
+            scopesToResult <|
+                scopesMap4 (setupScope registryTx)
+                    scopeOwners
+                    (scopesMap Tuple.first scopesRegistries)
+                    scopesPermissions
+                    scopesTreasuries
+
+        contingencyScopeResult : Transaction -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
+        contingencyScopeResult registryTx contingencyTreasury =
+            setupScope registryTx (MultisigScript.AnyOf []) (Tuple.first contingencyRegistry) contingencyPermissions contingencyTreasury
+    in
+    Result.map2 Tuple.pair scopesTreasuriesResult contingencyTreasuryResult
+        |> Result.andThen
+            (\( scopesTreasuries, contingencyTreasury ) ->
+                createRegistriesTx (scopesMap Tuple.first scopesTreasuries) (Tuple.first contingencyTreasury)
+                    |> Result.andThen
+                        (\txFinalized ->
+                            let
+                                setupTxs =
+                                    { scopes = txs.scopes
+                                    , permissions = txs.permissions
+                                    , registries = txFinalized
+                                    }
+
+                                loadedTreasuryResult =
+                                    Result.map2 (LoadedTreasury rootUtxo)
+                                        (scopesResult txFinalized.tx scopesTreasuries)
+                                        (contingencyScopeResult txFinalized.tx contingencyTreasury)
+                            in
+                            Result.map (Tuple.pair setupTxs) loadedTreasuryResult
+                        )
+            )
+
+
+setupAmaruScopes : Model -> Cip30.Wallet -> Scopes MultisigScript -> Result String ( ( ( OutputReference, Output ), TxFinalized ), ( Bytes CredentialHash, PlutusScript ) )
+setupAmaruScopes model connectedWallet scopeOwners =
+    let
+        walletAddress =
+            Cip30.walletChangeAddress connectedWallet
+
+        rootSeedUtxo : Result String ( OutputReference, Output )
+        rootSeedUtxo =
+            pickSeedUtxo model.localStateUtxos walletAddress (N.fromSafeInt 3000000)
+
+        applyAmaruScopesTrapScript : OutputReference -> Result String PlutusScript
+        applyAmaruScopesTrapScript rootSeedRef =
+            Uplc.applyParamsToScript [ Utxo.outputReferenceToData rootSeedRef ]
+                model.scripts.scopesTrap
+
+        twoAda =
+            Value.onlyLovelace <| N.fromSafeInt 2000000
+
+        createAmaruScopesTx : OutputReference -> ( Bytes CredentialHash, PlutusScript ) -> Result TxFinalizationError TxFinalized
+        createAmaruScopesTx rootSeedRef ( scriptHash, plutusScript ) =
+            let
+                scopesTrapAddress =
+                    Address.script model.networkId scriptHash
+
+                ( policyId, assetName ) =
+                    ( scriptHash, Bytes.fromText "amaru scopes" )
+
+                scopesDatum =
+                    scopesToList scopeOwners
+                        |> List.map MultisigScript.toData
+                        |> Data.Constr N.zero
+                        |> Utxo.datumValueFromData
+            in
+            -- Spend 2 ada from the wallet
+            [ TxIntent.Spend <|
+                FromWallet
+                    { address = walletAddress
+                    , value = twoAda
+                    , guaranteedUtxos = [ rootSeedRef ]
+                    }
+
+            -- Mint 1 policyId / assetName
+            , TxIntent.MintBurn
+                { policyId = policyId
+                , assets = Bytes.Map.singleton assetName I.one
+                , scriptWitness =
+                    Witness.Plutus
+                        { script = ( Script.plutusVersion plutusScript, Witness.ByValue <| Script.cborWrappedBytes plutusScript )
+                        , redeemerData = \_ -> Data.List [] -- unused
+                        , requiredSigners = [] -- no required signer for minting
+                        }
+                }
+
+            -- Send 2 ada + policyId/assetName + scopesDatum to the scopes trap address
+            , TxIntent.SendToOutput <|
+                { address = scopesTrapAddress
+                , amount = Value.add twoAda <| Value.onlyToken policyId assetName N.one
+                , datumOption = Just scopesDatum
+                , referenceScript = Nothing
+                }
+            ]
+                |> TxIntent.finalize model.localStateUtxos []
+    in
+    rootSeedUtxo
+        |> Result.andThen
+            (\(( seedRef, _ ) as seedUtxo) ->
+                applyAmaruScopesTrapScript seedRef
+                    |> Result.andThen
+                        (\plutusScript ->
+                            let
+                                scriptHash =
+                                    Script.hash <| Script.Plutus plutusScript
+                            in
+                            createAmaruScopesTx seedRef ( scriptHash, plutusScript )
+                                |> Result.map (\txFinalized -> ( ( seedUtxo, txFinalized ), ( scriptHash, plutusScript ) ))
+                                |> Result.mapError TxIntent.errorToString
+                        )
+            )
+
+
+setupPermissions : Model -> Cip30.Wallet -> ( TxFinalized, Bytes CredentialHash, PlutusScript ) -> Result String ( TxFinalized, Scopes ( Bytes CredentialHash, PlutusScript ), ( Bytes CredentialHash, PlutusScript ) )
+setupPermissions model connectedWallet ( { tx }, scopesTrapScriptHash, scopesTrapScript ) =
+    let
+        applyPermissionsScript scopeIndex =
+            Uplc.applyParamsToScript
+                [ Data.Bytes <| Bytes.toAny scopesTrapScriptHash
+                , Data.Constr (N.fromSafeInt scopeIndex) [] -- the scope Data representation
+                ]
+                model.scripts.scopePermissions
+                |> Result.map (\script -> ( Script.hash <| Script.Plutus script, script ))
+
+        scopesPermissionsResult : Result String (Scopes ( Bytes CredentialHash, PlutusScript ))
+        scopesPermissionsResult =
+            Scopes 0 1 2 3
+                |> scopesMap applyPermissionsScript
+                |> scopesToResult
+
+        createPermissionsStakeRegTx : List ( Bytes CredentialHash, PlutusScript ) -> Result TxFinalizationError TxFinalized
+        createPermissionsStakeRegTx permissions =
+            let
+                walletAddress =
+                    Cip30.walletChangeAddress connectedWallet
+
+                { updatedState } =
+                    TxIntent.updateLocalState (Transaction.computeTxId tx) tx model.localStateUtxos
+
+                twoAda =
+                    N.fromSafeInt 2000000
+
+                stakeRegWitness hash script =
+                    Witness.WithScript hash <|
+                        Witness.Plutus
+                            { script = ( Script.plutusVersion script, Witness.ByValue <| Script.cborWrappedBytes script )
+                            , redeemerData = \_ -> Data.List [] -- unused anyway
+                            , requiredSigners = []
+                            }
+
+                stakeRegIntent ( hash, script ) =
+                    [ TxIntent.Spend <|
+                        FromWallet
+                            { address = walletAddress
+                            , value = Value.onlyLovelace twoAda
+                            , guaranteedUtxos = []
+                            }
+                    , TxIntent.IssueCertificate <|
+                        TxIntent.RegisterStake { delegator = stakeRegWitness hash script, deposit = twoAda }
+                    ]
+            in
+            permissions
+                |> List.concatMap stakeRegIntent
+                |> TxIntent.finalize updatedState []
+    in
+    Result.map2 Tuple.pair scopesPermissionsResult (applyPermissionsScript 4)
+        |> Result.andThen
+            (\( scopePermissions, contingencyPermissions ) ->
+                createPermissionsStakeRegTx (scopesToList scopePermissions ++ [ contingencyPermissions ])
+                    |> Result.mapError TxIntent.errorToString
+                    |> Result.map (\txFinalized -> ( txFinalized, scopePermissions, contingencyPermissions ))
+            )
+
+
+setupRegistries : PlutusScript -> OutputReference -> Result String ( Scopes ( Bytes CredentialHash, PlutusScript ), ( Bytes CredentialHash, PlutusScript ) )
+setupRegistries registryTrapScript registriesSeedUtxo =
+    let
+        applyRegistryScript scopeIndex =
+            Uplc.applyParamsToScript
+                [ Utxo.outputReferenceToData registriesSeedUtxo
+                , Data.Constr (N.fromSafeInt scopeIndex) [] -- the scope Data representation
+                ]
+                registryTrapScript
+
+        andComputeHash plutusScript =
+            ( Script.hash <| Script.Plutus plutusScript, plutusScript )
+
+        scopesRegistries =
+            Scopes 0 1 2 3
+                |> scopesMap (applyRegistryScript >> Result.map andComputeHash)
+                |> scopesToResult
+
+        contingencyRegistry =
+            applyRegistryScript 4 |> Result.map andComputeHash
+    in
+    Result.map2 Tuple.pair scopesRegistries contingencyRegistry
+
+
+setupTreasury : Model -> Bytes CredentialHash -> Bytes CredentialHash -> Result String PlutusScript
+setupTreasury model registryScriptHash permissionsScriptHash =
+    let
+        multisig =
+            MultisigScript.Script permissionsScriptHash
+
+        treasuryConfig : Types.TreasuryConfiguration
+        treasuryConfig =
+            { registryToken = registryScriptHash
+            , permissions =
+                { reorganize = multisig
+                , sweep = multisig
+                , fund = MultisigScript.AnyOf []
+                , disburse = multisig
+                }
+            , expiration = N.fromSafeInt model.treasuryLoadingParams.treasuryConfigExpiration
+            , payoutUpperbound = N.zero
+            }
+    in
+    Uplc.applyParamsToScript [ Types.treasuryConfigToData treasuryConfig ] model.scripts.sundaeTreasury
+
+
+setupScope : Transaction -> MultisigScript -> Bytes CredentialHash -> ( Bytes CredentialHash, PlutusScript ) -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
+setupScope registryTx scopeOwner registryScriptHash permissions treasury =
+    let
+        -- Extract the registry UTxO from the Tx creating all registry UTxOs
+        registryUtxoResult : Result String ( OutputReference, Output )
+        registryUtxoResult =
+            let
+                txId =
+                    Transaction.computeTxId registryTx
+
+                maybeOutputIndex =
+                    registryTx.body.outputs
+                        |> List.Extra.findIndex (\{ amount } -> MultiAsset.get registryScriptHash Types.registryTokenName amount.assets /= Nothing)
+            in
+            case maybeOutputIndex of
+                Nothing ->
+                    Err <| "Registry token " ++ Bytes.toHex registryScriptHash ++ " not found in registry Tx " ++ Bytes.toHex txId
+
+                Just outputIndex ->
+                    List.Extra.getAt outputIndex registryTx.body.outputs
+                        |> Maybe.map (Tuple.pair (OutputReference txId outputIndex))
+                        |> Result.fromMaybe ("Weird, there is not output at index " ++ String.fromInt outputIndex)
+    in
+    registryUtxoResult
+        |> Result.map
+            (\utxo ->
+                { owner = scopeOwner
+                , permissionsScript = permissions
+                , sundaeTreasuryScript = treasury
+                , registryUtxo = utxo
+                , treasuryUtxos = Utxo.emptyRefDict
+                }
+            )
+
+
+{-| Picking a seed UTxO with a similar algorithm than the one used
+to select viable collateral UTxOs, because it’s usually relatively clean UTxOs.
+Default to the first UTxO at the address if the coin selection failed.
+-}
+pickSeedUtxo : Utxo.RefDict Output -> Address -> Natural -> Result String ( OutputReference, Output )
+pickSeedUtxo localStateUtxos address amount =
+    let
+        utxosAtAddress : List ( OutputReference, Output )
+        utxosAtAddress =
+            Dict.Any.filter (\_ output -> output.address == address) localStateUtxos
+                |> Dict.Any.toList
+    in
+    CoinSelection.collateral
+        { availableUtxos = utxosAtAddress
+        , allowedAddresses = Address.dictFromList [ ( address, () ) ]
+        , targetAmount = amount
+        }
+        |> Result.mapError CoinSelection.errorToString
+        |> Result.andThen
+            (\{ selectedUtxos } ->
+                case ( List.head selectedUtxos, List.head utxosAtAddress ) of
+                    ( Nothing, Nothing ) ->
+                        Err <| "There is no UTxO in the connected wallet for its default change address: " ++ Address.toBech32 address
+
+                    ( Nothing, Just first ) ->
+                        Ok first
+
+                    ( Just first, _ ) ->
+                        Ok first
+            )
+
+
 type alias LoadedTreasury =
     { rootUtxo : ( OutputReference, Output )
     , scopes : Scopes Scope
@@ -277,6 +705,43 @@ type alias Scopes a =
     , consensus : a
     , mercenaries : a
     , marketing : a
+    }
+
+
+scopesToList : Scopes a -> List a
+scopesToList { ledger, consensus, mercenaries, marketing } =
+    [ ledger, consensus, mercenaries, marketing ]
+
+
+scopesToResult : Scopes (Result err a) -> Result err (Scopes a)
+scopesToResult { ledger, consensus, mercenaries, marketing } =
+    Result.map4 Scopes ledger consensus mercenaries marketing
+
+
+scopesMap : (a -> b) -> Scopes a -> Scopes b
+scopesMap f { ledger, consensus, mercenaries, marketing } =
+    { ledger = f ledger
+    , consensus = f consensus
+    , mercenaries = f mercenaries
+    , marketing = f marketing
+    }
+
+
+scopesMap2 : (a -> b -> c) -> Scopes a -> Scopes b -> Scopes c
+scopesMap2 f s1 s2 =
+    { ledger = f s1.ledger s2.ledger
+    , consensus = f s1.consensus s2.consensus
+    , mercenaries = f s1.mercenaries s2.mercenaries
+    , marketing = f s1.marketing s2.marketing
+    }
+
+
+scopesMap4 : (a -> b -> c -> d -> e) -> Scopes a -> Scopes b -> Scopes c -> Scopes d -> Scopes e
+scopesMap4 f s1 s2 s3 s4 =
+    { ledger = f s1.ledger s2.ledger s3.ledger s4.ledger
+    , consensus = f s1.consensus s2.consensus s3.consensus s4.consensus
+    , mercenaries = f s1.mercenaries s2.mercenaries s3.mercenaries s4.mercenaries
+    , marketing = f s1.marketing s2.marketing s3.marketing s4.marketing
     }
 
 
@@ -321,21 +786,25 @@ init { db, blueprints, treasuryLoadingParams } =
                 |> Result.withDefault []
                 |> List.concat
 
-        sundaeTreasuryBlueprint =
-            List.Extra.find (\{ name } -> name == "treasury.treasury.spend") decodedBlueprints
-
         registryBlueprint =
             List.Extra.find (\{ name } -> name == "traps.treasury_registry.spend") decodedBlueprints
 
-        amaruTreasuryBlueprint =
+        scopesBlueprint =
+            List.Extra.find (\{ name } -> name == "traps.scopes.mint") decodedBlueprints
+
+        sundaeTreasuryBlueprint =
+            List.Extra.find (\{ name } -> name == "treasury.treasury.spend") decodedBlueprints
+
+        permissionsBlueprint =
             List.Extra.find (\{ name } -> name == "permissions.permissions.withdraw") decodedBlueprints
 
         ( scripts, blueprintError ) =
-            case ( sundaeTreasuryBlueprint, registryBlueprint, amaruTreasuryBlueprint ) of
-                ( Just treasury, Just registry, Just amaru ) ->
+            case ( ( registryBlueprint, scopesBlueprint ), ( sundaeTreasuryBlueprint, permissionsBlueprint ) ) of
+                ( ( Just registry, Just scopes ), ( Just treasury, Just permissions ) ) ->
                     ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 treasury.scriptBytes
                       , registryTrap = Script.plutusScriptFromBytes PlutusV3 registry.scriptBytes
-                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 amaru.scriptBytes
+                      , scopesTrap = Script.plutusScriptFromBytes PlutusV3 scopes.scriptBytes
+                      , scopePermissions = Script.plutusScriptFromBytes PlutusV3 permissions.scriptBytes
                       }
                     , Nothing
                     )
@@ -343,6 +812,7 @@ init { db, blueprints, treasuryLoadingParams } =
                 _ ->
                     ( { sundaeTreasury = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
                       , registryTrap = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
+                      , scopesTrap = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
                       , scopePermissions = Script.plutusScriptFromBytes PlutusV3 Bytes.empty
                       }
                     , Just "Failed the retrieve some of the Plutus blueprints. Did you forget to build the aiken code?"
@@ -500,7 +970,7 @@ startTreasuryLoading model =
         loadRegistryUtxos loadingScopes contingencyScope =
             let
                 registryAssetName =
-                    Bytes.fromText "REGISTRY"
+                    Types.registryTokenName
 
                 registryAssets =
                     Scopes
@@ -895,11 +1365,10 @@ handleCompletedTask model taskCompleted =
                                     List.filterMap extractAppliedTreasuryScriptHash loadingScopes
 
                                 loadingScopes =
-                                    -- TODO: add the contingency scope
                                     case treasuryManagement of
                                         TreasuryLoading { scopes, contingency } ->
                                             -- The list order is the same as the order of the scopes
-                                            [ scopes.ledger, scopes.consensus, scopes.mercenaries, scopes.marketing, contingency ]
+                                            scopesToList scopes ++ [ contingency ]
 
                                         _ ->
                                             []

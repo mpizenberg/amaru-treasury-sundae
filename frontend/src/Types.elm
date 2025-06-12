@@ -1,7 +1,7 @@
 module Types exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
-import Cardano.Address exposing (CredentialHash)
+import Cardano.Address as Address exposing (Credential)
 import Cardano.Data as Data exposing (Data)
 import Cardano.MultiAsset exposing (AssetName, PolicyId)
 import Cardano.Value as Value exposing (Value)
@@ -15,14 +15,22 @@ import Natural as N exposing (Natural)
 
 
 type alias ScriptHashRegistry =
-    { treasury : Bytes CredentialHash
-    , vendor : Bytes CredentialHash
+    { treasury : Credential
+    , vendor : Credential
     }
 
 
 registryTokenName : Bytes AssetName
 registryTokenName =
     Bytes.fromText "REGISTRY"
+
+
+registryToData : ScriptHashRegistry -> Data
+registryToData { treasury, vendor } =
+    Data.Constr N.zero
+        [ Address.credentialToData treasury
+        , Address.credentialToData vendor
+        ]
 
 
 
