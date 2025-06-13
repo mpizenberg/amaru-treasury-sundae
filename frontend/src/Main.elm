@@ -22,7 +22,7 @@ import Dict
 import Dict.Any
 import Html exposing (Html, div, text)
 import Html.Attributes as HA exposing (height, src)
-import Html.Events exposing (onClick)
+import Html.Events as HE exposing (onClick)
 import Http
 import Integer as I
 import Json.Decode as JD
@@ -105,6 +105,8 @@ type Msg
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
       -- Treasury management
+    | StartTreasurySetup
+    | UpdateSetupForm SetupFormMsg
     | StartTreasuryLoading
     | TreasuryMergingMsg TreasuryMergingMsg
       -- Task port
@@ -171,8 +173,58 @@ type alias Scripts =
 
 type TreasuryManagement
     = TreasuryUnspecified
+    | TreasurySetupForm SetupForm
+    | TreasurySetupTxs SetupTxsState
     | TreasuryLoading LoadingTreasury
     | TreasuryFullyLoaded LoadedTreasury
+
+
+type alias SetupForm =
+    { ledgerOwner : String
+    , consensusOwner : String
+    , mercenariesOwner : String
+    , marketingOwner : String
+    , validation : Maybe (Result String (Scopes MultisigScript))
+    }
+
+
+initTreasurySetupForm : SetupForm
+initTreasurySetupForm =
+    { ledgerOwner = ""
+    , consensusOwner = ""
+    , mercenariesOwner = ""
+    , marketingOwner = ""
+    , validation = Nothing
+    }
+
+
+type alias SetupTxsState =
+    { txs : SetupTxs
+    , treasury : LoadedTreasury
+    , tracking :
+        { scopes : TxState
+        , permissions : TxState
+        , registries : TxState
+        }
+    }
+
+
+initSetupTxsState : SetupTxs -> LoadedTreasury -> SetupTxsState
+initSetupTxsState txs treasury =
+    { txs = txs
+    , treasury = treasury
+    , tracking =
+        { scopes = TxNotSubmittedYet
+        , permissions = TxNotSubmittedYet
+        , registries = TxNotSubmittedYet
+        }
+    }
+
+
+type TxState
+    = TxNotSubmittedYet
+    | TxSubmitting
+    | TxSubmitted
 
 
 type alias LoadingTreasury =
@@ -883,6 +935,17 @@ update msg model =
         GotNetworkParams (Ok params) ->
             ( { model | protocolParams = params }, Cmd.none )
 
+        StartTreasurySetup ->
+            ( { model | treasuryManagement = TreasurySetupForm initTreasurySetupForm }, Cmd.none )
+
+        UpdateSetupForm subMsg ->
+            case model.treasuryManagement of
+                TreasurySetupForm form ->
+                    handleTreasurySetupFormUpdate subMsg form model
+
+                _ ->
+                    ( model, Cmd.none )
+
         StartTreasuryLoading ->
             startTreasuryLoading model
 
@@ -934,6 +997,88 @@ handleWalletMsg value model =
         -- TODO: handle the error case
         _ ->
             ( model, Cmd.none )
+
+
+
+-- Initializing a new Treasury
+
+
+type SetupFormMsg
+    = LedgerOwnerField String
+    | ConsensusOwnerField String
+    | MercenariesOwnerField String
+    | MarketingOwnerField String
+    | ValidateSetupForm
+    | TryBuildSetupTxs
+
+
+handleTreasurySetupFormUpdate : SetupFormMsg -> SetupForm -> Model -> ( Model, Cmd Msg )
+handleTreasurySetupFormUpdate msg form model =
+    let
+        updatedTreasuryManagement =
+            updateSetupFormField model msg form
+    in
+    ( { model | treasuryManagement = updatedTreasuryManagement }
+    , Cmd.none
+    )
+
+
+updateSetupFormField : Model -> SetupFormMsg -> SetupForm -> TreasuryManagement
+updateSetupFormField model msg form =
+    case msg of
+        LedgerOwnerField value ->
+            TreasurySetupForm { form | ledgerOwner = value }
+
+        ConsensusOwnerField value ->
+            TreasurySetupForm { form | consensusOwner = value }
+
+        MercenariesOwnerField value ->
+            TreasurySetupForm { form | mercenariesOwner = value }
+
+        MarketingOwnerField value ->
+            TreasurySetupForm { form | marketingOwner = value }
+
+        ValidateSetupForm ->
+            TreasurySetupForm { form | validation = Just <| validateSetup form }
+
+        TryBuildSetupTxs ->
+            case form.validation of
+                Just (Ok scopeOwners) ->
+                    case model.connectedWallet of
+                        Nothing ->
+                            TreasurySetupForm { form | validation = Just <| Err "Please connect wallet first" }
+
+                        Just wallet ->
+                            case setupAmaruTreasury model wallet scopeOwners of
+                                Err error ->
+                                    TreasurySetupForm { form | validation = Just <| Err error }
+
+                                Ok ( txs, treasury ) ->
+                                    TreasurySetupTxs <| initSetupTxsState txs treasury
+
+                _ ->
+                    TreasurySetupForm form
+
+
+validateSetup : SetupForm -> Result String (Scopes MultisigScript)
+validateSetup form =
+    Scopes form.ledgerOwner form.consensusOwner form.mercenariesOwner form.marketingOwner
+        |> scopesMap validateKeyHash
+        |> scopesToResult
+
+
+validateKeyHash : String -> Result String MultisigScript
+validateKeyHash hex =
+    case Bytes.fromHex hex of
+        Nothing ->
+            Err <| "Invalid hex string: " ++ hex
+
+        Just bytes ->
+            if Bytes.width bytes /= 28 then
+                Err <| "This credential is not 28 bytes long: " ++ Bytes.toHex bytes
+
+            else
+                Ok (MultisigScript.Signature bytes)
 
 
 
@@ -1721,9 +1866,18 @@ viewTreasurySection treasuryManagement =
         TreasuryUnspecified ->
             div []
                 [ Html.p [] [ Html.text "Treasury unspecified yet" ]
+                , Html.button [ onClick StartTreasurySetup ]
+                    [ text "Setup a new treasury" ]
+                , text " or "
                 , Html.button [ onClick StartTreasuryLoading ]
-                    [ Html.text "Load pre-initialized treasury" ]
+                    [ text "Load pre-initialized treasury" ]
                 ]
+
+        TreasurySetupForm form ->
+            viewTreasurySetupForm form
+
+        TreasurySetupTxs state ->
+            viewSetupTxsState state
 
         TreasuryLoading { rootUtxo, scopes, contingency } ->
             div []
@@ -1750,6 +1904,116 @@ viewTreasurySection treasuryManagement =
                 , viewScope rootUtxoRef "marketing" scopes.marketing
                 , viewScope rootUtxoRef "contingency" contingency
                 ]
+
+
+viewTreasurySetupForm : SetupForm -> Html Msg
+viewTreasurySetupForm form =
+    case form.validation of
+        Nothing ->
+            viewTreasurySetupFormHelper form Nothing
+
+        Just (Err errors) ->
+            viewTreasurySetupFormHelper form (Just errors)
+
+        Just (Ok scopeOwners) ->
+            viewScopeOwnersSetup scopeOwners
+
+
+viewScopeOwnersSetup : Scopes MultisigScript -> Html Msg
+viewScopeOwnersSetup scopeOwners =
+    div []
+        [ Html.h2 [] [ text "Setup New Treasury" ]
+        , Html.h3 [] [ text "Scope Owners" ]
+        , Html.ul []
+            [ Html.li [] [ text <| "ledger: " ++ Debug.toString scopeOwners.ledger ]
+            , Html.li [] [ text <| "consensus: " ++ Debug.toString scopeOwners.consensus ]
+            , Html.li [] [ text <| "mercenaries: " ++ Debug.toString scopeOwners.mercenaries ]
+            , Html.li [] [ text <| "marketing: " ++ Debug.toString scopeOwners.marketing ]
+            ]
+        , Html.p []
+            [ Html.button [ onClick <| UpdateSetupForm TryBuildSetupTxs ]
+                [ text "Build the Txs" ]
+            ]
+        ]
+
+
+viewTreasurySetupFormHelper : SetupForm -> Maybe String -> Html Msg
+viewTreasurySetupFormHelper form errors =
+    div []
+        [ Html.h2 [] [ text "Setup New Treasury" ]
+        , div []
+            [ Html.h3 [] [ text "Scope Owners" ]
+            , Html.p [] [ text "Enter the aicone multisigs for each scope owner (for now just enter a public key hash):" ]
+            ]
+        , div []
+            [ viewFormField "Ledger" form.ledgerOwner LedgerOwnerField
+            , viewFormField "Consensus" form.consensusOwner ConsensusOwnerField
+            , viewFormField "Mercenaries" form.mercenariesOwner MercenariesOwnerField
+            , viewFormField "Marketing" form.marketingOwner MarketingOwnerField
+            ]
+        , Html.p []
+            [ Html.button [ onClick (UpdateSetupForm ValidateSetupForm) ]
+                [ text "Validate scope owners & prepare Txs" ]
+            ]
+        , viewFormErrors errors
+        ]
+
+
+viewFormField : String -> String -> (String -> SetupFormMsg) -> Html Msg
+viewFormField label value field =
+    div []
+        [ Html.label [] [ text <| label ++ ": " ]
+        , Html.input
+            [ HA.type_ "text"
+            , HA.placeholder "Enter public key hash"
+            , HE.onInput (UpdateSetupForm << field)
+            , HA.value value
+            ]
+            []
+        ]
+
+
+viewFormErrors : Maybe String -> Html Msg
+viewFormErrors maybeErrors =
+    case maybeErrors of
+        Nothing ->
+            text ""
+
+        Just errors ->
+            div [ HA.style "color" "red" ] [ text errors ]
+
+
+viewSetupTxsState : SetupTxsState -> Html Msg
+viewSetupTxsState { txs, treasury, tracking } =
+    let
+        rootUtxoRef =
+            Tuple.first treasury.rootUtxo
+    in
+    div []
+        [ Html.h2 [] [ text "Treasury State after Init" ]
+        , viewRootUtxo treasury.rootUtxo
+        , viewScope rootUtxoRef "ledger" treasury.scopes.ledger
+        , viewScope rootUtxoRef "consensus" treasury.scopes.consensus
+        , viewScope rootUtxoRef "mercenaries" treasury.scopes.mercenaries
+        , viewScope rootUtxoRef "marketing" treasury.scopes.marketing
+        , viewScope rootUtxoRef "contingency" treasury.contingency
+        , Html.h2 [] [ text "Txs to submit for Treasury Init" ]
+        , Html.h3 [] [ text "Scope Owners Definition" ]
+        , viewTxStatus tracking.scopes txs.scopes
+        , Html.h3 [] [ text "Permissions Stake Registration" ]
+        , viewTxStatus tracking.permissions txs.permissions
+        , Html.h3 [] [ text "Registries Initializations" ]
+        , viewTxStatus tracking.registries txs.registries
+        ]
+
+
+viewTxStatus : TxState -> TxFinalized -> Html Msg
+viewTxStatus txState { tx, expectedSignatures } =
+    div []
+        [ Html.p [] [ text <| "Tx state: " ++ Debug.toString txState ]
+        , Html.p [] [ text <| "Tx details:" ]
+        , Html.pre [] [ text <| prettyTx tx ]
+        ]
 
 
 viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
