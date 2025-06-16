@@ -324,16 +324,36 @@ setupAmaruTreasury model connectedWallet scopeOwners =
     setupAmaruScopes model connectedWallet scopeOwners
         |> Result.andThen
             (\( ( scopesSeedUtxo, setupScopesTx ), ( scopesTrapScriptHash, scopesTrapScript ) ) ->
-                setupPermissions model connectedWallet ( setupScopesTx, scopesTrapScriptHash, scopesTrapScript )
+                let
+                    scopesTxId =
+                        Transaction.computeTxId setupScopesTx.tx
+
+                    localStateAfterAmaruScopes =
+                        (TxIntent.updateLocalState scopesTxId setupScopesTx.tx model.localStateUtxos).updatedState
+
+                    modelAfterAmaruScopesTx =
+                        { model | localStateUtxos = localStateAfterAmaruScopes }
+                in
+                setupPermissions modelAfterAmaruScopesTx connectedWallet ( setupScopesTx, scopesTrapScriptHash, scopesTrapScript )
                     |> Result.andThen
                         (\( setupPermissionsTx, scopesPermissions, contingencyPermissions ) ->
-                            pickSeedUtxo model.localStateUtxos (Cip30.walletChangeAddress connectedWallet) (N.fromSafeInt 10000000)
+                            let
+                                permissionsTxId =
+                                    Transaction.computeTxId setupPermissionsTx.tx
+
+                                localStateAfterPermissions =
+                                    (TxIntent.updateLocalState permissionsTxId setupPermissionsTx.tx modelAfterAmaruScopesTx.localStateUtxos).updatedState
+
+                                modelAfterPermissionsTx =
+                                    { model | localStateUtxos = localStateAfterPermissions }
+                            in
+                            pickSeedUtxo localStateAfterPermissions (Cip30.walletChangeAddress connectedWallet) (N.fromSafeInt 10000000)
                                 |> Result.andThen
                                     (\( registriesSeedRef, registriesSeedOutput ) ->
                                         setupRegistries model.scripts.registryTrap registriesSeedRef
                                             |> Result.andThen
                                                 (\( scopesRegistries, contingencyRegistry ) ->
-                                                    setupLastStep model
+                                                    setupLastStep modelAfterPermissionsTx
                                                         connectedWallet
                                                         { txs =
                                                             { scopes = setupScopesTx
@@ -400,12 +420,6 @@ setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissi
                 walletAddress =
                     Cip30.walletChangeAddress connectedWallet
 
-                -- Re-apply both the scopes and permissions Txs to local state before building the registry Tx
-                { updatedState } =
-                    TxIntent.updateLocalState (Transaction.computeTxId txs.scopes.tx) txs.scopes.tx model.localStateUtxos
-                        |> .updatedState
-                        |> TxIntent.updateLocalState (Transaction.computeTxId txs.permissions.tx) txs.permissions.tx
-
                 twoAda =
                     Value.onlyLovelace <| N.fromSafeInt 2000000
 
@@ -452,7 +466,7 @@ setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissi
             , mintIntent contingencyTreasuryHash contingencyRegistry
             ]
                 |> List.concat
-                |> TxIntent.finalize updatedState []
+                |> TxIntent.finalize model.localStateUtxos []
                 |> Result.mapError TxIntent.errorToString
 
         scopesResult : Transaction -> Scopes ( Bytes CredentialHash, PlutusScript ) -> Result String (Scopes Scope)
@@ -594,9 +608,6 @@ setupPermissions model connectedWallet ( { tx }, scopesTrapScriptHash, scopesTra
                 walletAddress =
                     Cip30.walletChangeAddress connectedWallet
 
-                { updatedState } =
-                    TxIntent.updateLocalState (Transaction.computeTxId tx) tx model.localStateUtxos
-
                 twoAda =
                     N.fromSafeInt 2000000
 
@@ -621,7 +632,7 @@ setupPermissions model connectedWallet ( { tx }, scopesTrapScriptHash, scopesTra
             in
             permissions
                 |> List.concatMap stakeRegIntent
-                |> TxIntent.finalize updatedState []
+                |> TxIntent.finalize model.localStateUtxos []
     in
     Result.map2 Tuple.pair scopesPermissionsResult (applyPermissionsScript 4)
         |> Result.andThen
@@ -1980,7 +1991,7 @@ viewFormErrors maybeErrors =
             text ""
 
         Just errors ->
-            div [ HA.style "color" "red" ] [ text errors ]
+            Html.pre [ HA.style "color" "red" ] [ text errors ]
 
 
 viewSetupTxsState : SetupTxsState -> Html Msg
