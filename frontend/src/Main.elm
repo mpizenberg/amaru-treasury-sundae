@@ -1996,19 +1996,15 @@ viewFormErrors maybeErrors =
 
 viewSetupTxsState : SetupTxsState -> Html Msg
 viewSetupTxsState { txs, treasury, tracking } =
-    let
-        rootUtxoRef =
-            Tuple.first treasury.rootUtxo
-    in
     div []
-        [ Html.h2 [] [ text "Treasury State after Init" ]
+        [ Html.h2 [] [ text "Treasury State after Initialization" ]
         , viewRootUtxo treasury.rootUtxo
-        , viewScope rootUtxoRef "ledger" treasury.scopes.ledger
-        , viewScope rootUtxoRef "consensus" treasury.scopes.consensus
-        , viewScope rootUtxoRef "mercenaries" treasury.scopes.mercenaries
-        , viewScope rootUtxoRef "marketing" treasury.scopes.marketing
-        , viewScope rootUtxoRef "contingency" treasury.contingency
-        , Html.h2 [] [ text "Txs to submit for Treasury Init" ]
+        , viewScopeSetup "ledger" treasury.scopes.ledger
+        , viewScopeSetup "consensus" treasury.scopes.consensus
+        , viewScopeSetup "mercenaries" treasury.scopes.mercenaries
+        , viewScopeSetup "marketing" treasury.scopes.marketing
+        , viewScopeSetup "contingency" treasury.contingency
+        , Html.h2 [] [ text "Txs to submit for Treasury Initialization" ]
         , Html.h3 [] [ text "Scope Owners Definition" ]
         , viewTxStatus tracking.scopes txs.scopes
         , Html.h3 [] [ text "Permissions Stake Registration" ]
@@ -2058,6 +2054,17 @@ viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScri
         , viewRegistryNftPolicyId registryNftPolicyId
         , viewLoadingRegistryUtxo registryUtxo
         , viewLoadingTreasuryUtxos treasuryUtxos
+        ]
+
+
+viewScopeSetup : String -> Scope -> Html Msg
+viewScopeSetup scopeName { owner, permissionsScript, sundaeTreasuryScript, registryUtxo } =
+    div [ HA.style "border" "1px solid black" ]
+        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
+        , viewOwner owner
+        , viewPermissionsScript permissionsScript
+        , viewTreasuryScript sundaeTreasuryScript
+        , viewRegistryUtxo registryUtxo
         ]
 
 
