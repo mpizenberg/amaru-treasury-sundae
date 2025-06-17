@@ -14,7 +14,7 @@ import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxExamples exposing (prettyTx)
 import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalizationError, TxFinalized, TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
-import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
+import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference, TransactionId)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
 import ConcurrentTask exposing (ConcurrentTask)
@@ -356,8 +356,8 @@ setupAmaruTreasury model connectedWallet scopeOwners =
                                                     setupLastStep modelAfterPermissionsTx
                                                         connectedWallet
                                                         { txs =
-                                                            { scopes = setupScopesTx
-                                                            , permissions = setupPermissionsTx
+                                                            { scopes = { txId = scopesTxId, finalized = setupScopesTx }
+                                                            , permissions = { txId = permissionsTxId, finalized = setupPermissionsTx }
                                                             }
                                                         , rootUtxo = scopesSeedUtxo
                                                         , scopeOwners = scopeOwners
@@ -375,8 +375,8 @@ setupAmaruTreasury model connectedWallet scopeOwners =
 
 type alias LastStepParams =
     { txs :
-        { scopes : TxFinalized
-        , permissions : TxFinalized
+        { scopes : { txId : Bytes TransactionId, finalized : TxFinalized }
+        , permissions : { txId : Bytes TransactionId, finalized : TxFinalized }
         }
     , rootUtxo : ( OutputReference, Output )
     , scopeOwners : Scopes MultisigScript
@@ -389,9 +389,9 @@ type alias LastStepParams =
 
 
 type alias SetupTxs =
-    { scopes : TxFinalized
-    , permissions : TxFinalized
-    , registries : TxFinalized
+    { scopes : { txId : Bytes TransactionId, finalized : TxFinalized }
+    , permissions : { txId : Bytes TransactionId, finalized : TxFinalized }
+    , registries : { txId : Bytes TransactionId, finalized : TxFinalized }
     }
 
 
@@ -469,18 +469,18 @@ setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissi
                 |> TxIntent.finalize model.localStateUtxos []
                 |> Result.mapError TxIntent.errorToString
 
-        scopesResult : Transaction -> Scopes ( Bytes CredentialHash, PlutusScript ) -> Result String (Scopes Scope)
-        scopesResult registryTx scopesTreasuries =
+        scopesResult : Bytes TransactionId -> Transaction -> Scopes ( Bytes CredentialHash, PlutusScript ) -> Result String (Scopes Scope)
+        scopesResult txId registryTx scopesTreasuries =
             scopesToResult <|
-                scopesMap4 (setupScope registryTx)
+                scopesMap4 (setupScope txId registryTx)
                     scopeOwners
                     (scopesMap Tuple.first scopesRegistries)
                     scopesPermissions
                     scopesTreasuries
 
-        contingencyScopeResult : Transaction -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
-        contingencyScopeResult registryTx contingencyTreasury =
-            setupScope registryTx (MultisigScript.AnyOf []) (Tuple.first contingencyRegistry) contingencyPermissions contingencyTreasury
+        contingencyScopeResult : Bytes TransactionId -> Transaction -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
+        contingencyScopeResult txId registryTx contingencyTreasury =
+            setupScope txId registryTx (MultisigScript.AnyOf []) (Tuple.first contingencyRegistry) contingencyPermissions contingencyTreasury
     in
     Result.map2 Tuple.pair scopesTreasuriesResult contingencyTreasuryResult
         |> Result.andThen
@@ -489,16 +489,19 @@ setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissi
                     |> Result.andThen
                         (\txFinalized ->
                             let
+                                registriesTxId =
+                                    Transaction.computeTxId txFinalized.tx
+
                                 setupTxs =
                                     { scopes = txs.scopes
                                     , permissions = txs.permissions
-                                    , registries = txFinalized
+                                    , registries = { txId = registriesTxId, finalized = txFinalized }
                                     }
 
                                 loadedTreasuryResult =
                                     Result.map2 (LoadedTreasury rootUtxo)
-                                        (scopesResult txFinalized.tx scopesTreasuries)
-                                        (contingencyScopeResult txFinalized.tx contingencyTreasury)
+                                        (scopesResult registriesTxId txFinalized.tx scopesTreasuries)
+                                        (contingencyScopeResult registriesTxId txFinalized.tx contingencyTreasury)
                             in
                             Result.map (Tuple.pair setupTxs) loadedTreasuryResult
                         )
@@ -689,16 +692,13 @@ setupTreasury model registryScriptHash permissionsScriptHash =
     Uplc.applyParamsToScript [ Types.treasuryConfigToData treasuryConfig ] model.scripts.sundaeTreasury
 
 
-setupScope : Transaction -> MultisigScript -> Bytes CredentialHash -> ( Bytes CredentialHash, PlutusScript ) -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
-setupScope registryTx scopeOwner registryScriptHash permissions treasury =
+setupScope : Bytes TransactionId -> Transaction -> MultisigScript -> Bytes CredentialHash -> ( Bytes CredentialHash, PlutusScript ) -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
+setupScope txId registryTx scopeOwner registryScriptHash permissions treasury =
     let
         -- Extract the registry UTxO from the Tx creating all registry UTxOs
         registryUtxoResult : Result String ( OutputReference, Output )
         registryUtxoResult =
             let
-                txId =
-                    Transaction.computeTxId registryTx
-
                 maybeOutputIndex =
                     registryTx.body.outputs
                         |> List.Extra.findIndex (\{ amount } -> MultiAsset.get registryScriptHash Types.registryTokenName amount.assets /= Nothing)
@@ -2014,12 +2014,14 @@ viewSetupTxsState { txs, treasury, tracking } =
         ]
 
 
-viewTxStatus : TxState -> TxFinalized -> Html Msg
-viewTxStatus txState { tx, expectedSignatures } =
+viewTxStatus : TxState -> { txId : Bytes TransactionId, finalized : TxFinalized } -> Html Msg
+viewTxStatus txState { txId, finalized } =
     div []
         [ Html.p [] [ text <| "Tx state: " ++ Debug.toString txState ]
+
+        -- , Html.p [] [ viewTxActions txState ]
         , Html.p [] [ text <| "Tx details:" ]
-        , Html.pre [] [ text <| prettyTx tx ]
+        , Html.pre [] [ text <| prettyTx finalized.tx ]
         ]
 
 
