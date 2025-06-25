@@ -29,6 +29,7 @@ import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
+import Page.SignTx as SignTx
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
@@ -104,6 +105,9 @@ type Msg
     | DisconnectWallet
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
+    | SignTxButtonClicked SignTx.Subject SignTx.Prep
+      -- Signature page
+    | SignTxMsg SignTx.Msg
       -- Treasury management
     | StartTreasurySetup
     | UpdateSetupForm SetupFormMsg
@@ -161,6 +165,7 @@ initialModel db scripts treasuryLoadingParams =
 
 type Page
     = Home
+    | SignTxPage SignTx.Model
 
 
 type alias Scripts =
@@ -389,9 +394,9 @@ type alias LastStepParams =
 
 
 type alias SetupTxs =
-    { scopes : { txId : Bytes TransactionId, finalized : TxFinalized }
-    , permissions : { txId : Bytes TransactionId, finalized : TxFinalized }
-    , registries : { txId : Bytes TransactionId, finalized : TxFinalized }
+    { scopes : SignTx.Prep
+    , permissions : SignTx.Prep
+    , registries : SignTx.Prep
     }
 
 
@@ -492,10 +497,45 @@ setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissi
                                 registriesTxId =
                                     Transaction.computeTxId txFinalized.tx
 
+                                walletKeyHash =
+                                    Address.extractPaymentCred (Cip30.walletChangeAddress connectedWallet)
+                                        |> Maybe.andThen Address.extractCredentialKeyHash
+                                        |> Maybe.withDefault (Bytes.dummy 28 "")
+
+                                defaultSignerDescriptions : BytesMap CredentialHash String
+                                defaultSignerDescriptions =
+                                    [ [ ( walletKeyHash, "Fees and deposit provider" ) ]
+                                    , MultisigScript.extractRequiredSigners scopeOwners.ledger
+                                        |> List.map (\hash -> ( hash, "Ledger scope signer" ))
+                                    , MultisigScript.extractRequiredSigners scopeOwners.consensus
+                                        |> List.map (\hash -> ( hash, "Consensus scope signer" ))
+                                    , MultisigScript.extractRequiredSigners scopeOwners.mercenaries
+                                        |> List.map (\hash -> ( hash, "Mercenaries scope signer" ))
+                                    , MultisigScript.extractRequiredSigners scopeOwners.marketing
+                                        |> List.map (\hash -> ( hash, "Marketing scope signer" ))
+                                    ]
+                                        |> List.concat
+                                        |> Bytes.Map.fromList
+
                                 setupTxs =
-                                    { scopes = txs.scopes
-                                    , permissions = txs.permissions
-                                    , registries = { txId = registriesTxId, finalized = txFinalized }
+                                    { scopes =
+                                        { txId = txs.scopes.txId
+                                        , tx = txs.scopes.finalized.tx
+                                        , expectedSignatures = txs.scopes.finalized.expectedSignatures
+                                        , signerDescriptions = defaultSignerDescriptions
+                                        }
+                                    , permissions =
+                                        { txId = txs.permissions.txId
+                                        , tx = txs.permissions.finalized.tx
+                                        , expectedSignatures = txs.permissions.finalized.expectedSignatures
+                                        , signerDescriptions = defaultSignerDescriptions
+                                        }
+                                    , registries =
+                                        { txId = registriesTxId
+                                        , tx = txFinalized.tx
+                                        , expectedSignatures = txFinalized.expectedSignatures
+                                        , signerDescriptions = defaultSignerDescriptions
+                                        }
                                     }
 
                                 loadedTreasuryResult =
@@ -946,6 +986,21 @@ update msg model =
         GotNetworkParams (Ok params) ->
             ( { model | protocolParams = params }, Cmd.none )
 
+        SignTxButtonClicked signSubject signingPrep ->
+            ( { model | page = SignTxPage <| SignTx.initialModel signSubject (Just signingPrep) }
+            , Cmd.none
+            )
+
+        -- Signature page
+        SignTxMsg pageMsg ->
+            case model.page of
+                SignTxPage pageModel ->
+                    handleSignTxMsg pageModel pageMsg model
+
+                _ ->
+                    ( model, Cmd.none )
+
+        -- Treasury management
         StartTreasurySetup ->
             ( { model | treasuryManagement = TreasurySetupForm initTreasurySetupForm }, Cmd.none )
 
@@ -963,6 +1018,7 @@ update msg model =
         TreasuryMergingMsg submsg ->
             handleTreasuryMergingMsg submsg model
 
+        -- Task port
         OnTaskProgress ( taskPool, cmd ) ->
             ( { model | taskPool = taskPool }, cmd )
 
@@ -999,15 +1055,108 @@ handleWalletMsg value model =
             , Cmd.none
             )
 
-        -- We just received a CIP-30 api error from the wallet
-        Ok (Cip30.ApiError { code, info }) ->
-            ( { model | error = Just <| "Wallet Error (code " ++ String.fromInt code ++ "):\n" ++ info }
+        -- The wallet just signed a Tx
+        Ok (Cip30.ApiResponse _ (Cip30.SignedTx vkeyWitnesses)) ->
+            case model.page of
+                SignTxPage pageModel ->
+                    ( { model | page = SignTxPage <| SignTx.addWalletSignatures vkeyWitnesses pageModel }
+                    , Cmd.none
+                    )
+
+                -- No other page expects to receive a Tx signature
+                _ ->
+                    ( model, Cmd.none )
+
+        -- The wallet just submitted a Tx
+        Ok (Cip30.ApiResponse _ (Cip30.SubmittedTx txId)) ->
+            case model.page of
+                SignTxPage pageModel ->
+                    ( { model
+                        | page = SignTxPage <| SignTx.recordSubmittedTx txId pageModel
+
+                        -- Update local state UTxOs
+                        , localStateUtxos =
+                            SignTx.getTxInfo pageModel
+                                |> Maybe.map (\{ tx } -> (TxIntent.updateLocalState txId tx model.localStateUtxos).updatedState)
+                                |> Maybe.withDefault model.localStateUtxos
+                      }
+                    , Cmd.none
+                    )
+
+                -- No other page expects to submit a Tx
+                _ ->
+                    ( model, Cmd.none )
+
+        Ok (Cip30.ApiResponse _ _) ->
+            ( { model | error = Just "TODO: unhandled CIP30 response yet" }
             , Cmd.none
             )
 
-        -- TODO: handle the error case
+        -- Received an error message from the wallet
+        Ok (Cip30.ApiError { info, code }) ->
+            ( { model
+                -- TODO: ideally, each port to wallet should know
+                -- how to redirect to a new message in fromWallet.
+                -- That would need a bit of thinking to figure out a good way.
+                -- For now, I mostly observed errors at Tx signing/submission
+                | page = resetSigningStep info model.page
+                , error = Just <| "Wallet Error (code " ++ String.fromInt code ++ "):\n" ++ info
+              }
+            , Cmd.none
+            )
+
+        -- Unknown type of message received from the wallet
+        Ok (Cip30.UnhandledResponseType error) ->
+            ( { model | error = Just error }
+            , Cmd.none
+            )
+
+        Err error ->
+            ( { model | error = Just <| "CIP-30 decoding error: " ++ JD.errorToString error }
+            , Cmd.none
+            )
+
+
+{-| Helper function to reset the signing step of the Preparation.
+-}
+resetSigningStep : String -> Page -> Page
+resetSigningStep error page =
+    case page of
+        SignTxPage pageModel ->
+            SignTxPage <| SignTx.resetSubmission error pageModel
+
         _ ->
-            ( model, Cmd.none )
+            page
+
+
+
+-- Signature page
+
+
+handleSignTxMsg : SignTx.Model -> SignTx.Msg -> Model -> ( Model, Cmd Msg )
+handleSignTxMsg pageModel msg model =
+    let
+        ( walletSignTx, walletSubmitTx ) =
+            case model.connectedWallet of
+                Nothing ->
+                    ( \_ -> Cmd.none
+                    , \_ -> Cmd.none
+                    )
+
+                Just wallet ->
+                    ( \tx -> toWallet (Cip30.encodeRequest (Cip30.signTx wallet { partialSign = True } tx))
+                    , \tx -> toWallet (Cip30.encodeRequest (Cip30.submitTx wallet tx))
+                    )
+
+        ctx =
+            { wrapMsg = SignTxMsg
+            , wallet = model.connectedWallet
+            , walletSignTx = walletSignTx
+            , walletSubmitTx = walletSubmitTx
+            }
+    in
+    SignTx.update ctx msg pageModel
+        |> Tuple.mapFirst (\newPageModel -> { model | page = SignTxPage newPageModel })
 
 
 
@@ -1789,6 +1938,23 @@ addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketi
 
 view : Model -> Html Msg
 view model =
+    case model.page of
+        Home ->
+            viewHome model
+
+        SignTxPage pageModel ->
+            let
+                viewContext =
+                    { wrapMsg = SignTxMsg
+                    , wallet = model.connectedWallet
+                    , networkId = model.networkId
+                    }
+            in
+            SignTx.view viewContext pageModel
+
+
+viewHome : Model -> Html Msg
+viewHome model =
     div []
         [ viewError model.error
         , viewWalletSection model
@@ -1844,7 +2010,7 @@ viewAvailableWallets wallets =
             Html.button [ onClick (ConnectButtonClicked { id = id }) ] [ text "connect" ]
 
         walletRow w =
-            div [] [ walletIcon w, text (walletDescription w), connectButton w ]
+            div [] [ walletIcon w, text <| walletDescription w ++ " ", connectButton w ]
     in
     div [] (List.map walletRow wallets)
 
@@ -2014,14 +2180,40 @@ viewSetupTxsState { txs, treasury, tracking } =
         ]
 
 
-viewTxStatus : TxState -> { txId : Bytes TransactionId, finalized : TxFinalized } -> Html Msg
-viewTxStatus txState { txId, finalized } =
+viewTxStatus : TxState -> SignTx.Prep -> Html Msg
+viewTxStatus txState ({ txId, tx, expectedSignatures, signerDescriptions } as signingPrep) =
+    let
+        displaySigner signer =
+            case Bytes.Map.get signer signerDescriptions of
+                Nothing ->
+                    Html.li [] [ text <| "Signer: " ++ Bytes.toHex signer ]
+
+                Just description ->
+                    Html.li [] [ text <| description ++ ": " ++ Bytes.toHex signer ]
+
+        actions =
+            case txState of
+                TxNotSubmittedYet ->
+                    Html.button
+                        [ onClick <| SignTxButtonClicked SignTx.TreasurySetup signingPrep ]
+                        [ text "Sign on signing page" ]
+
+                TxSubmitting ->
+                    div [] [ text "Tx is being submitted ... ", spinner ]
+
+                TxSubmitted ->
+                    text "Tx has been submitted!"
+    in
     div []
         [ Html.p [] [ text <| "Tx state: " ++ Debug.toString txState ]
-
-        -- , Html.p [] [ viewTxActions txState ]
+        , Html.p []
+            [ text <| "Expected signers:"
+            , Html.ul [] <| List.map displaySigner expectedSignatures
+            ]
+        , Html.p [] [ actions ]
         , Html.p [] [ text <| "Tx details:" ]
-        , Html.pre [] [ text <| prettyTx finalized.tx ]
+        , Html.p [] [ text <| "Tx ID: " ++ Bytes.toHex txId ]
+        , Html.pre [] [ text <| prettyTx tx ]
         ]
 
 
