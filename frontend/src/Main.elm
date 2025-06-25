@@ -29,7 +29,7 @@ import Json.Decode as JD
 import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
-import Page.SignTx as SignTx
+import Page.SignTx as SignTx exposing (Subject(..))
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
@@ -100,6 +100,7 @@ port receiveTask : (JD.Value -> msg) -> Sub msg
 
 type Msg
     = NoMsg
+    | GoToHomePage
     | UrlChanged String
     | WalletMsg JD.Value
     | DisconnectWallet
@@ -968,6 +969,9 @@ update msg model =
         NoMsg ->
             ( model, Cmd.none )
 
+        GoToHomePage ->
+            ( { model | page = Home }, Cmd.none )
+
         UrlChanged _ ->
             ( Debug.todo "", Debug.todo "" )
 
@@ -1079,6 +1083,10 @@ handleWalletMsg value model =
                             SignTx.getTxInfo pageModel
                                 |> Maybe.map (\{ tx } -> (TxIntent.updateLocalState txId tx model.localStateUtxos).updatedState)
                                 |> Maybe.withDefault model.localStateUtxos
+
+                        -- TODO: also update the treasuryManagement?
+                        , treasuryManagement =
+                            updateTreasuryManagementWithTx txId model.treasuryManagement
                       }
                     , Cmd.none
                     )
@@ -1127,6 +1135,31 @@ resetSigningStep error page =
 
         _ ->
             page
+
+
+updateTreasuryManagementWithTx : Bytes TransactionId -> TreasuryManagement -> TreasuryManagement
+updateTreasuryManagementWithTx txId treasuryManagement =
+    case treasuryManagement of
+        TreasurySetupTxs setupState ->
+            TreasurySetupTxs <| markTxAsSubmitted txId setupState
+
+        _ ->
+            treasuryManagement
+
+
+markTxAsSubmitted : Bytes TransactionId -> SetupTxsState -> SetupTxsState
+markTxAsSubmitted txId ({ tracking } as state) =
+    if txId == state.txs.scopes.txId then
+        { state | tracking = { tracking | scopes = TxSubmitted } }
+
+    else if txId == state.txs.permissions.txId then
+        { state | tracking = { tracking | permissions = TxSubmitted } }
+
+    else if txId == state.txs.registries.txId then
+        { state | tracking = { tracking | registries = TxSubmitted } }
+
+    else
+        state
 
 
 
@@ -1946,6 +1979,14 @@ view model =
             let
                 viewContext =
                     { wrapMsg = SignTxMsg
+                    , toCallbackPage =
+                        \subject ->
+                            case subject of
+                                SignTx.Unknown ->
+                                    GoToHomePage
+
+                                SignTx.TreasurySetup ->
+                                    GoToHomePage
                     , wallet = model.connectedWallet
                     , networkId = model.networkId
                     }

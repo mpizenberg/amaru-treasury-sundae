@@ -296,6 +296,7 @@ resetSubmission error model =
 
 type alias ViewContext msg =
     { wrapMsg : Msg -> msg
+    , toCallbackPage : Subject -> msg
     , wallet : Maybe Cip30.Wallet
     , networkId : NetworkId
     }
@@ -404,7 +405,16 @@ view ctx model =
                                     ]
                                     [ text <| "View on CardanoScan ↗" ]
                                 ]
+                            , Html.p [] [ Html.button [ onClick <| ctx.toCallbackPage subject ] [ text <| "Back to page: " ++ callbackPageName ] ]
                             ]
+
+                    callbackPageName =
+                        case subject of
+                            Unknown ->
+                                "unknown?"
+
+                            TreasurySetup ->
+                                "Treasury setup"
                 in
                 div []
                     [ div []
