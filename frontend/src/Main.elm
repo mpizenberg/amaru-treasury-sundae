@@ -1141,7 +1141,8 @@ updateTreasuryManagementWithTx : Bytes TransactionId -> TreasuryManagement -> Tr
 updateTreasuryManagementWithTx txId treasuryManagement =
     case treasuryManagement of
         TreasurySetupTxs setupState ->
-            TreasurySetupTxs <| markTxAsSubmitted txId setupState
+            markTxAsSubmitted txId setupState
+                |> upgradeToLoadedIfSetupIsDone
 
         _ ->
             treasuryManagement
@@ -1160,6 +1161,16 @@ markTxAsSubmitted txId ({ tracking } as state) =
 
     else
         state
+
+
+upgradeToLoadedIfSetupIsDone : SetupTxsState -> TreasuryManagement
+upgradeToLoadedIfSetupIsDone ({ tracking } as state) =
+    case ( tracking.scopes, tracking.permissions, tracking.registries ) of
+        ( TxSubmitted, TxSubmitted, TxSubmitted ) ->
+            TreasuryFullyLoaded state.treasury
+
+        _ ->
+            TreasurySetupTxs state
 
 
 
