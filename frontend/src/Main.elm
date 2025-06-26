@@ -112,6 +112,7 @@ type Msg
       -- Treasury management
     | StartTreasurySetup
     | UpdateSetupForm SetupFormMsg
+    | TreasuryLoadingParamsMsg TreasuryLoadingParamsMsg
     | StartTreasuryLoading
     | TreasuryMergingMsg TreasuryMergingMsg
       -- Task port
@@ -1016,6 +1017,9 @@ update msg model =
                 _ ->
                     ( model, Cmd.none )
 
+        TreasuryLoadingParamsMsg paramsMsg ->
+            handleTreasuryLoadingParamsMsg paramsMsg model
+
         StartTreasuryLoading ->
             startTreasuryLoading model
 
@@ -1283,6 +1287,41 @@ validateKeyHash hex =
 
             else
                 Ok (MultisigScript.Signature bytes)
+
+
+
+-- Loading Treasury Form
+
+
+type TreasuryLoadingParamsMsg
+    = UpdatePragmaScriptHash String
+    | UpdateRegistriesSeedTransactionId String
+    | UpdateRegistriesSeedOutputIndex String
+
+
+handleTreasuryLoadingParamsMsg : TreasuryLoadingParamsMsg -> Model -> ( Model, Cmd Msg )
+handleTreasuryLoadingParamsMsg msg ({ treasuryLoadingParams } as model) =
+    let
+        newParams params =
+            { model | treasuryLoadingParams = params }
+
+        currentUtxo =
+            treasuryLoadingParams.registriesSeedUtxo
+    in
+    case msg of
+        UpdatePragmaScriptHash value ->
+            ( newParams { treasuryLoadingParams | pragmaScriptHash = value }, Cmd.none )
+
+        UpdateRegistriesSeedTransactionId value ->
+            ( newParams { treasuryLoadingParams | registriesSeedUtxo = { currentUtxo | transactionId = value } }, Cmd.none )
+
+        UpdateRegistriesSeedOutputIndex value ->
+            case String.toInt value of
+                Just outputIndex ->
+                    ( newParams { treasuryLoadingParams | registriesSeedUtxo = { currentUtxo | outputIndex = outputIndex } }, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
 
 
@@ -2013,7 +2052,7 @@ viewHome model =
         , viewLocalStateUtxosSection model.localStateUtxos
         , case model.treasuryAction of
             NoTreasuryAction ->
-                viewTreasurySection model.treasuryManagement
+                viewTreasurySection model.treasuryLoadingParams model.treasuryManagement
 
             MergeTreasuryUtxos mergeState ->
                 viewMergeUtxosAction model.connectedWallet mergeState
@@ -2089,8 +2128,8 @@ viewLocalStateUtxosSection utxos =
 -- Treasury Section
 
 
-viewTreasurySection : TreasuryManagement -> Html Msg
-viewTreasurySection treasuryManagement =
+viewTreasurySection : TreasuryLoadingParams -> TreasuryManagement -> Html Msg
+viewTreasurySection params treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
             div []
@@ -2100,6 +2139,35 @@ viewTreasurySection treasuryManagement =
                 , text " or "
                 , Html.button [ onClick StartTreasuryLoading ]
                     [ text "Load pre-initialized treasury" ]
+                , Html.p [] [ text "Override treasury loading parameters:" ]
+                , Html.p []
+                    [ Html.label [] [ text "Pragma Scopes script hash: " ]
+                    , Html.input
+                        [ HA.type_ "text"
+                        , HA.value params.pragmaScriptHash
+                        , HE.onInput (TreasuryLoadingParamsMsg << UpdatePragmaScriptHash)
+                        ]
+                        []
+                    ]
+                , Html.p []
+                    [ Html.label [] [ text "Registries Seed UTxO - Tx ID: " ]
+                    , Html.input
+                        [ HA.type_ "text"
+                        , HA.value params.registriesSeedUtxo.transactionId
+                        , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedTransactionId)
+                        ]
+                        []
+                    ]
+                , Html.p []
+                    [ Html.label [] [ text "Registries Seed UTxO - Output Index: " ]
+                    , Html.input
+                        [ HA.type_ "number"
+                        , HA.value <| String.fromInt params.registriesSeedUtxo.outputIndex
+                        , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedOutputIndex)
+                        ]
+                        []
+                    ]
+                , viewExpirationDate params.treasuryConfigExpiration
                 ]
 
         TreasurySetupForm form ->
@@ -2112,6 +2180,9 @@ viewTreasurySection treasuryManagement =
             div []
                 [ Html.p [] [ text "Loading treasury ... ", spinner ]
                 , viewLoadingRootUtxo rootUtxo
+                , viewPragmaScopesScriptHash params.pragmaScriptHash
+                , viewRegistriesSeedUtxo params.registriesSeedUtxo
+                , viewExpirationDate params.treasuryConfigExpiration
                 , viewLoadingScope "ledger" scopes.ledger
                 , viewLoadingScope "consensus" scopes.consensus
                 , viewLoadingScope "mercenaries" scopes.mercenaries
@@ -2127,12 +2198,30 @@ viewTreasurySection treasuryManagement =
             div []
                 [ Html.p [] [ text "Treasury fully loaded" ]
                 , viewRootUtxo rootUtxo
+                , viewPragmaScopesScriptHash params.pragmaScriptHash
+                , viewRegistriesSeedUtxo params.registriesSeedUtxo
+                , viewExpirationDate params.treasuryConfigExpiration
                 , viewScope rootUtxoRef "ledger" scopes.ledger
                 , viewScope rootUtxoRef "consensus" scopes.consensus
                 , viewScope rootUtxoRef "mercenaries" scopes.mercenaries
                 , viewScope rootUtxoRef "marketing" scopes.marketing
                 , viewScope rootUtxoRef "contingency" contingency
                 ]
+
+
+viewPragmaScopesScriptHash : String -> Html msg
+viewPragmaScopesScriptHash scriptHash =
+    Html.p [] [ text <| "(PRAGMA) Scopes script hash: " ++ scriptHash ]
+
+
+viewRegistriesSeedUtxo : { transactionId : String, outputIndex : Int } -> Html msg
+viewRegistriesSeedUtxo { transactionId, outputIndex } =
+    Html.p [] [ text <| "Registries Seed UTXO: " ++ transactionId ++ " #" ++ String.fromInt outputIndex ]
+
+
+viewExpirationDate : Int -> Html msg
+viewExpirationDate posixDate =
+    Html.p [] [ text <| "Expiration Date (Posix): " ++ String.fromInt posixDate ]
 
 
 viewTreasurySetupForm : SetupForm -> Html Msg
