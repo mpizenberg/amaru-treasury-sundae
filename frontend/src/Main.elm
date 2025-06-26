@@ -1777,7 +1777,8 @@ handleCompletedTask model taskCompleted =
                                             }
 
                                 bytesMapToList bytesMap =
-                                    List.filterMap (\hash -> Bytes.Map.get hash bytesMap) allTreasuriesScriptHashes
+                                    List.map (\hash -> Bytes.Map.get hash bytesMap |> Maybe.withDefault Utxo.emptyRefDict)
+                                        allTreasuriesScriptHashes
 
                                 listToScopes utxosInList =
                                     case utxosInList of
@@ -2362,13 +2363,13 @@ viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
 viewLoadingRootUtxo rootUtxo =
     case rootUtxo of
         RemoteData.NotAsked ->
-            Html.p [] [ text "PRAGMA root UTxO not asked yet" ]
+            Html.p [] [ text "(PRAGMA) root scopes UTxO not asked yet" ]
 
         RemoteData.Loading ->
-            Html.p [] [ text "PRAGMA root UTxO loading ... ", spinner ]
+            Html.p [] [ text "(PRAGMA) root scopes UTxO loading ... ", spinner ]
 
         RemoteData.Failure error ->
-            Html.p [] [ text <| "PRAGMA root UTxO failed to load: " ++ error ]
+            Html.p [] [ text <| "(PRAGMA) root scopes UTxO failed to load: " ++ error ]
 
         RemoteData.Success utxo ->
             viewRootUtxo utxo
@@ -2376,7 +2377,7 @@ viewLoadingRootUtxo rootUtxo =
 
 viewRootUtxo : ( OutputReference, Output ) -> Html msg
 viewRootUtxo ( ref, _ ) =
-    Html.p [] [ text <| "PRAGMA root UTxO: " ++ Utxo.refAsString ref ]
+    Html.p [] [ text <| "(PRAGMA) root scopes UTxO: " ++ Utxo.refAsString ref ]
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
