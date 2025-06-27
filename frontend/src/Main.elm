@@ -1518,20 +1518,17 @@ handleBuildMergeTransaction model requiredSigners currentTime =
                         |> Time.millisToPosix
                         |> Uplc.timeToSlot slotConfig
 
-                slotIn36Hours =
-                    (Time.posixToMillis currentTime + 1000 * 3600 * 36)
+                slotIn6Hours =
+                    (Time.posixToMillis currentTime + 1000 * 3600 * 6)
                         |> Time.millisToPosix
                         |> Uplc.timeToSlot slotConfig
 
                 validityRange =
-                    Just { start = N.toInt slot10sAgo, end = slotIn36Hours }
+                    Just { start = N.toInt slot10sAgo, end = slotIn6Hours }
                         |> Debug.log "validityRange"
 
                 ( mergeTxIntents, mergeOtherInfo ) =
                     mergeUtxos model.networkId mergeState.rootUtxo mergeState.scope requiredSigners validityRange
-
-                txOtherInfo =
-                    TxIntent.TxReferenceInput mergeState.rootUtxo :: mergeOtherInfo
 
                 feeSource =
                     Cip30.walletChangeAddress wallet
@@ -1545,7 +1542,7 @@ handleBuildMergeTransaction model requiredSigners currentTime =
                         , costModels = Uplc.conwayDefaultCostModels
                         }
                         (TxIntent.AutoFee { paymentSource = feeSource })
-                        txOtherInfo
+                        mergeOtherInfo
                         mergeTxIntents
 
                 updatedMergeState =
@@ -1601,9 +1598,6 @@ handleSubmitMergeTransaction tx model =
 
 
 {-| Merge all UTxOs from a given scope.
-
-REMARK: you also need to add a `TxIntent.TxReferenceInput rootUtxoRef`
-
 -}
 mergeUtxos : NetworkId -> OutputReference -> Scope -> List (Bytes CredentialHash) -> Maybe { start : Int, end : Natural } -> ( List TxIntent, List TxOtherInfo )
 mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
@@ -1634,17 +1628,15 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
         ( permissionsScriptHash, permissionsScript ) =
             scope.permissionsScript
 
-        scopeTreasuryAddress =
-            case utxos of
-                ( _, { address } ) :: _ ->
-                    address
+        ( treasuryScriptHash, treasuryScript ) =
+            scope.sundaeTreasuryScript
 
-                _ ->
-                    Debug.todo "impossible to have utxos = []"
+        -- The address must have a stake cred (delegated to always abstain)
+        scopeTreasuryAddress =
+            Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
     in
     Treasury.reorganize
-        { treasuryScriptBytes =
-            Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
+        { treasuryScriptBytes = Script.cborWrappedBytes treasuryScript
         , registryOutputRef = Tuple.first scope.registryUtxo
         , additionalOutputRefs = [ rootUtxo ]
         , requiredSigners = requiredSigners
