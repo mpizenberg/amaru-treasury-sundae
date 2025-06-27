@@ -10,6 +10,7 @@ import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
+import Cbor.Encode as CE
 import Natural exposing (Natural)
 import Types exposing (TreasuryConfiguration, TreasurySpendRedeemer(..), treasuryConfigToData, treasurySpendRedeemerToData)
 
@@ -18,6 +19,14 @@ import Types exposing (TreasuryConfiguration, TreasurySpendRedeemer(..), treasur
 -}
 initializeScript : TreasuryConfiguration -> Script.PlutusScript -> Result String Script.PlutusScript
 initializeScript config unappliedScript =
+    let
+        _ =
+            Data.toCborUplc (treasuryConfigToData config)
+                |> CE.encode
+                |> Bytes.Comparable.fromBytes
+                |> Bytes.Comparable.toHex
+                |> Debug.log "treasury config"
+    in
     Uplc.applyParamsToScript [ treasuryConfigToData config ] unappliedScript
 
 
@@ -144,7 +153,7 @@ reorganize { treasuryScriptBytes, registryOutputRef, additionalOutputRefs, requi
                 |> List.map
                     (\( spentInputRef, spentOutput ) ->
                         spend (SpendConfig treasuryScriptBytes registryOutputRef requiredSigners requiredWithdrawals spentInputRef spentOutput validityRange)
-                            SweepTreasury
+                            Types.Reorganize
                             (\_ -> [])
                             spentOutput.amount
                     )

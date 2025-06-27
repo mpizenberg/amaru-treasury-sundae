@@ -111,6 +111,7 @@ type Msg
     | SignTxMsg SignTx.Msg
       -- Treasury management
     | StartTreasurySetup
+    | StartTreasurySetupWithCurrentTime Posix
     | UpdateSetupForm SetupFormMsg
     | TreasuryLoadingParamsMsg TreasuryLoadingParamsMsg
     | StartTreasuryLoading
@@ -191,16 +192,22 @@ type alias SetupForm =
     , consensusOwner : String
     , mercenariesOwner : String
     , marketingOwner : String
-    , validation : Maybe (Result String (Scopes MultisigScript))
+    , expiration : Int
+    , validation : Maybe SetupFormValidation
     }
 
 
-initTreasurySetupForm : SetupForm
-initTreasurySetupForm =
+type alias SetupFormValidation =
+    Result String { expiration : Int, scopeOwners : Scopes MultisigScript }
+
+
+initTreasurySetupForm : Posix -> SetupForm
+initTreasurySetupForm currentTime =
     { ledgerOwner = ""
     , consensusOwner = ""
     , mercenariesOwner = ""
     , marketingOwner = ""
+    , expiration = Time.posixToMillis currentTime
     , validation = Nothing
     }
 
@@ -239,6 +246,7 @@ type alias LoadingTreasury =
     , registriesSeedUtxo : OutputReference
     , treasuryConfigExpiration : Natural
     , rootUtxo : RemoteData String ( OutputReference, Output )
+    , expiration : Posix
     , scopes : Scopes LoadingScope
     , contingency : LoadingScope
     }
@@ -270,6 +278,7 @@ initLoadingTreasury unappliedScopePermissionScript unappliedRegistryTrapScript p
             , registriesSeedUtxo = registriesSeedUtxo
             , treasuryConfigExpiration = treasuryConfigExpiration
             , rootUtxo = RemoteData.Loading
+            , expiration = Time.millisToPosix expiration
             , scopes = Scopes ledger consensus mercenaries marketing
             , contingency = contingency
             }
@@ -326,8 +335,8 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
         registryScriptResult
 
 
-setupAmaruTreasury : Model -> Cip30.Wallet -> Scopes MultisigScript -> Result String ( SetupTxs, LoadedTreasury )
-setupAmaruTreasury model connectedWallet scopeOwners =
+setupAmaruTreasury : Model -> Cip30.Wallet -> { expiration : Int, scopeOwners : Scopes MultisigScript } -> Result String ( SetupTxs, LoadedTreasury )
+setupAmaruTreasury model connectedWallet { expiration, scopeOwners } =
     setupAmaruScopes model connectedWallet scopeOwners
         |> Result.andThen
             (\( ( scopesSeedUtxo, setupScopesTx ), ( scopesTrapScriptHash, scopesTrapScript ) ) ->
@@ -367,6 +376,7 @@ setupAmaruTreasury model connectedWallet scopeOwners =
                                                             , permissions = { txId = permissionsTxId, finalized = setupPermissionsTx }
                                                             }
                                                         , rootUtxo = scopesSeedUtxo
+                                                        , expiration = Time.millisToPosix expiration
                                                         , scopeOwners = scopeOwners
                                                         , scopesPermissions = scopesPermissions
                                                         , scopesRegistries = scopesRegistries
@@ -386,6 +396,7 @@ type alias LastStepParams =
         , permissions : { txId : Bytes TransactionId, finalized : TxFinalized }
         }
     , rootUtxo : ( OutputReference, Output )
+    , expiration : Posix
     , scopeOwners : Scopes MultisigScript
     , scopesPermissions : Scopes ( Bytes CredentialHash, PlutusScript )
     , scopesRegistries : Scopes ( Bytes CredentialHash, PlutusScript )
@@ -403,7 +414,7 @@ type alias SetupTxs =
 
 
 setupLastStep : Model -> Cip30.Wallet -> LastStepParams -> Result String ( SetupTxs, LoadedTreasury )
-setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, registriesSeedUtxo } =
+setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, registriesSeedUtxo } =
     let
         scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
         scopesTreasuryScriptsResult =
@@ -541,7 +552,7 @@ setupLastStep model connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissi
                                     }
 
                                 loadedTreasuryResult =
-                                    Result.map2 (LoadedTreasury rootUtxo)
+                                    Result.map2 (LoadedTreasury rootUtxo expiration)
                                         (scopesResult registriesTxId txFinalized.tx scopesTreasuries)
                                         (contingencyScopeResult registriesTxId txFinalized.tx contingencyTreasury)
                             in
@@ -731,7 +742,7 @@ setupTreasury model registryScriptHash permissionsScriptHash =
             , payoutUpperbound = N.zero
             }
     in
-    Uplc.applyParamsToScript [ Types.treasuryConfigToData treasuryConfig ] model.scripts.sundaeTreasury
+    Treasury.initializeScript treasuryConfig model.scripts.sundaeTreasury
 
 
 setupScope : Bytes TransactionId -> Transaction -> MultisigScript -> Bytes CredentialHash -> ( Bytes CredentialHash, PlutusScript ) -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
@@ -800,6 +811,11 @@ pickSeedUtxo localStateUtxos address amount =
 
 type alias LoadedTreasury =
     { rootUtxo : ( OutputReference, Output )
+
+    -- TODO: Add Pragma Scopes script hash?
+    -- TODO: Add Registries seed UTxO?
+    -- TODO: Is there one info that we can use to derive again all useful properties?
+    , expiration : Posix
     , scopes : Scopes Scope
     , contingency : Scope
     }
@@ -1007,7 +1023,10 @@ update msg model =
 
         -- Treasury management
         StartTreasurySetup ->
-            ( { model | treasuryManagement = TreasurySetupForm initTreasurySetupForm }, Cmd.none )
+            ( model, Task.perform StartTreasurySetupWithCurrentTime Time.now )
+
+        StartTreasurySetupWithCurrentTime currentTime ->
+            ( { model | treasuryManagement = TreasurySetupForm <| initTreasurySetupForm currentTime }, Cmd.none )
 
         UpdateSetupForm subMsg ->
             case model.treasuryManagement of
@@ -1087,8 +1106,6 @@ handleWalletMsg value model =
                             SignTx.getTxInfo pageModel
                                 |> Maybe.map (\{ tx } -> (TxIntent.updateLocalState txId tx model.localStateUtxos).updatedState)
                                 |> Maybe.withDefault model.localStateUtxos
-
-                        -- TODO: also update the treasuryManagement?
                         , treasuryManagement =
                             updateTreasuryManagementWithTx txId model.treasuryManagement
                       }
@@ -1100,17 +1117,13 @@ handleWalletMsg value model =
                     ( model, Cmd.none )
 
         Ok (Cip30.ApiResponse _ _) ->
-            ( { model | error = Just "TODO: unhandled CIP30 response yet" }
+            ( { model | error = Just "Unhandled CIP30 response yet" }
             , Cmd.none
             )
 
         -- Received an error message from the wallet
         Ok (Cip30.ApiError { info, code }) ->
             ( { model
-                -- TODO: ideally, each port to wallet should know
-                -- how to redirect to a new message in fromWallet.
-                -- That would need a bit of thinking to figure out a good way.
-                -- For now, I mostly observed errors at Tx signing/submission
                 | page = resetSigningStep info model.page
                 , error = Just <| "Wallet Error (code " ++ String.fromInt code ++ "):\n" ++ info
               }
@@ -1216,6 +1229,7 @@ type SetupFormMsg
     | ConsensusOwnerField String
     | MercenariesOwnerField String
     | MarketingOwnerField String
+    | ExpirationField String
     | ValidateSetupForm
     | TryBuildSetupTxs
 
@@ -1246,6 +1260,9 @@ updateSetupFormField model msg form =
         MarketingOwnerField value ->
             TreasurySetupForm { form | marketingOwner = value }
 
+        ExpirationField value ->
+            TreasurySetupForm { form | expiration = Maybe.withDefault 0 <| String.toInt value }
+
         ValidateSetupForm ->
             TreasurySetupForm { form | validation = Just <| validateSetup form }
 
@@ -1268,11 +1285,13 @@ updateSetupFormField model msg form =
                     TreasurySetupForm form
 
 
-validateSetup : SetupForm -> Result String (Scopes MultisigScript)
+validateSetup : SetupForm -> SetupFormValidation
 validateSetup form =
     Scopes form.ledgerOwner form.consensusOwner form.mercenariesOwner form.marketingOwner
         |> scopesMap validateKeyHash
         |> scopesToResult
+        -- TODO: add some validation of the expiration Int
+        |> Result.map (\scopes -> { expiration = form.expiration, scopeOwners = scopes })
 
 
 validateKeyHash : String -> Result String MultisigScript
@@ -1297,6 +1316,7 @@ type TreasuryLoadingParamsMsg
     = UpdatePragmaScriptHash String
     | UpdateRegistriesSeedTransactionId String
     | UpdateRegistriesSeedOutputIndex String
+    | UpdateExpiration String
 
 
 handleTreasuryLoadingParamsMsg : TreasuryLoadingParamsMsg -> Model -> ( Model, Cmd Msg )
@@ -1319,6 +1339,14 @@ handleTreasuryLoadingParamsMsg msg ({ treasuryLoadingParams } as model) =
             case String.toInt value of
                 Just outputIndex ->
                     ( newParams { treasuryLoadingParams | registriesSeedUtxo = { currentUtxo | outputIndex = outputIndex } }, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        UpdateExpiration value ->
+            case String.toInt value of
+                Just expiration ->
+                    ( newParams { treasuryLoadingParams | treasuryConfigExpiration = expiration }, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -1513,10 +1541,11 @@ handleBuildMergeTransaction model requiredSigners currentTime =
                         Testnet ->
                             Uplc.slotConfigPreview
 
-                slot10sAgo =
-                    (Time.posixToMillis currentTime - 1000 * 10)
-                        |> Time.millisToPosix
-                        |> Uplc.timeToSlot slotConfig
+                slot60sAgo =
+                    -- (Time.posixToMillis currentTime - 1000 * 60)
+                    --     |> Time.millisToPosix
+                    --     |> Uplc.timeToSlot slotConfig
+                    N.zero
 
                 slotIn6Hours =
                     (Time.posixToMillis currentTime + 1000 * 3600 * 6)
@@ -1524,7 +1553,7 @@ handleBuildMergeTransaction model requiredSigners currentTime =
                         |> Uplc.timeToSlot slotConfig
 
                 validityRange =
-                    Just { start = N.toInt slot10sAgo, end = slotIn6Hours }
+                    Just { start = N.toInt slot60sAgo, end = slotIn6Hours }
                         |> Debug.log "validityRange"
 
                 ( mergeTxIntents, mergeOtherInfo ) =
@@ -1898,7 +1927,7 @@ updateLoadingScopesFromData unappliedSundaeTreasuryScript data { ledger, consens
                     let
                         updateOwner scope owner =
                             { scope
-                                | owner = Just owner
+                                | owner = Just owner |> Debug.log "owner"
                                 , sundaeTreasuryScriptApplied = applySundaeTreasuryScript unappliedSundaeTreasuryScript scope
                             }
                     in
@@ -1944,7 +1973,7 @@ applySundaeTreasuryScript unappliedScript scope =
             , payoutUpperbound = N.zero
             }
     in
-    Uplc.applyParamsToScript [ Types.treasuryConfigToData treasuryConfig ] unappliedScript
+    Treasury.initializeScript treasuryConfig unappliedScript
         |> Result.Extra.unpack RemoteData.Failure
             (\applied -> RemoteData.Success ( Script.hash <| Script.Plutus applied, applied ))
 
@@ -1952,13 +1981,13 @@ applySundaeTreasuryScript unappliedScript scope =
 upgradeIfTreasuryLoadingFinished : Model -> Model
 upgradeIfTreasuryLoadingFinished model =
     case model.treasuryManagement of
-        TreasuryLoading { rootUtxo, scopes, contingency } ->
+        TreasuryLoading { rootUtxo, expiration, scopes, contingency } ->
             case ( rootUtxo, upgradeScopesIfLoadingFinished scopes, upgradeScope contingency ) of
                 ( RemoteData.Success ( ref, output ), Just loadedScopes, Just contingencyScope ) ->
                     -- Upgrade the treasury management
                     -- AND the local state utxos
                     { model
-                        | treasuryManagement = TreasuryFullyLoaded { rootUtxo = ( ref, output ), scopes = loadedScopes, contingency = contingencyScope }
+                        | treasuryManagement = TreasuryFullyLoaded { rootUtxo = ( ref, output ), expiration = expiration, scopes = loadedScopes, contingency = contingencyScope }
                         , localStateUtxos = addLoadedUtxos ( ref, output ) loadedScopes model.localStateUtxos
                     }
 
@@ -2160,7 +2189,16 @@ viewTreasurySection params treasuryManagement =
                         ]
                         []
                     ]
-                , viewExpirationDate params.treasuryConfigExpiration
+                , Html.p []
+                    [ Html.label [] [ text "Expiration date (Posix): " ]
+                    , Html.input
+                        [ HA.type_ "number"
+                        , HA.value <| String.fromInt params.treasuryConfigExpiration
+                        , HE.onInput (TreasuryLoadingParamsMsg << UpdateExpiration)
+                        ]
+                        []
+                    , text <| " (" ++ displayPosixDate (Time.millisToPosix params.treasuryConfigExpiration) ++ ")"
+                    ]
                 ]
 
         TreasurySetupForm form ->
@@ -2169,13 +2207,13 @@ viewTreasurySection params treasuryManagement =
         TreasurySetupTxs state ->
             viewSetupTxsState state
 
-        TreasuryLoading { rootUtxo, scopes, contingency } ->
+        TreasuryLoading { rootUtxo, treasuryConfigExpiration, scopes, contingency } ->
             div []
                 [ Html.p [] [ text "Loading treasury ... ", spinner ]
                 , viewLoadingRootUtxo rootUtxo
                 , viewPragmaScopesScriptHash params.pragmaScriptHash
                 , viewRegistriesSeedUtxo params.registriesSeedUtxo
-                , viewExpirationDate params.treasuryConfigExpiration
+                , viewExpirationDate <| N.toInt treasuryConfigExpiration
                 , viewLoadingScope "ledger" scopes.ledger
                 , viewLoadingScope "consensus" scopes.consensus
                 , viewLoadingScope "mercenaries" scopes.mercenaries
@@ -2183,7 +2221,7 @@ viewTreasurySection params treasuryManagement =
                 , viewLoadingScope "contingency" contingency
                 ]
 
-        TreasuryFullyLoaded { rootUtxo, scopes, contingency } ->
+        TreasuryFullyLoaded { rootUtxo, expiration, scopes, contingency } ->
             let
                 rootUtxoRef =
                     Tuple.first rootUtxo
@@ -2193,7 +2231,7 @@ viewTreasurySection params treasuryManagement =
                 , viewRootUtxo rootUtxo
                 , viewPragmaScopesScriptHash params.pragmaScriptHash
                 , viewRegistriesSeedUtxo params.registriesSeedUtxo
-                , viewExpirationDate params.treasuryConfigExpiration
+                , viewExpirationDate <| Time.posixToMillis expiration
                 , viewScope rootUtxoRef "ledger" scopes.ledger
                 , viewScope rootUtxoRef "consensus" scopes.consensus
                 , viewScope rootUtxoRef "mercenaries" scopes.mercenaries
@@ -2214,7 +2252,25 @@ viewRegistriesSeedUtxo { transactionId, outputIndex } =
 
 viewExpirationDate : Int -> Html msg
 viewExpirationDate posixDate =
-    Html.p [] [ text <| "Expiration Date (Posix): " ++ String.fromInt posixDate ]
+    Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt posixDate ++ " (" ++ displayPosixDate (Time.millisToPosix posixDate) ++ ")" ]
+
+
+displayPosixDate : Posix -> String
+displayPosixDate posix =
+    let
+        year =
+            Time.toYear Time.utc posix
+                |> String.fromInt
+
+        month =
+            Time.toMonth Time.utc posix
+                |> Debug.toString
+
+        day =
+            Time.toDay Time.utc posix
+                |> String.fromInt
+    in
+    "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day
 
 
 viewTreasurySetupForm : SetupForm -> Html Msg
@@ -2226,14 +2282,15 @@ viewTreasurySetupForm form =
         Just (Err errors) ->
             viewTreasurySetupFormHelper form (Just errors)
 
-        Just (Ok scopeOwners) ->
-            viewScopeOwnersSetup scopeOwners
+        Just (Ok { expiration, scopeOwners }) ->
+            viewScopeOwnersSetup expiration scopeOwners
 
 
-viewScopeOwnersSetup : Scopes MultisigScript -> Html Msg
-viewScopeOwnersSetup scopeOwners =
+viewScopeOwnersSetup : Int -> Scopes MultisigScript -> Html Msg
+viewScopeOwnersSetup expiration scopeOwners =
     div []
         [ Html.h2 [] [ text "Setup New Treasury" ]
+        , Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt expiration ++ " (" ++ displayPosixDate (Time.millisToPosix expiration) ++ ")" ]
         , Html.h3 [] [ text "Scope Owners" ]
         , Html.ul []
             [ Html.li [] [ text <| "ledger: " ++ Debug.toString scopeOwners.ledger ]
@@ -2252,6 +2309,16 @@ viewTreasurySetupFormHelper : SetupForm -> Maybe String -> Html Msg
 viewTreasurySetupFormHelper form errors =
     div []
         [ Html.h2 [] [ text "Setup New Treasury" ]
+        , Html.p []
+            [ Html.label [] [ text "Expiration date (Posix): " ]
+            , Html.input
+                [ HA.type_ "number"
+                , HA.value <| String.fromInt form.expiration
+                , HE.onInput (UpdateSetupForm << ExpirationField)
+                ]
+                []
+            , text <| " (" ++ displayPosixDate (Time.millisToPosix form.expiration) ++ ")"
+            ]
         , div []
             [ Html.h3 [] [ text "Scope Owners" ]
             , Html.p [] [ text "Enter the aicone multisigs for each scope owner (for now just enter a public key hash):" ]
