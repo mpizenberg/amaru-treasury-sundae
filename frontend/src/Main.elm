@@ -382,6 +382,7 @@ setupAmaruTreasury model connectedWallet { expiration, scopeOwners } =
                                                         , scopesRegistries = scopesRegistries
                                                         , contingencyPermissions = contingencyPermissions
                                                         , contingencyRegistry = contingencyRegistry
+                                                        , scopesScriptHash = scopesTrapScriptHash
                                                         , registriesSeedUtxo = ( registriesSeedRef, registriesSeedOutput )
                                                         }
                                                 )
@@ -402,6 +403,7 @@ type alias LastStepParams =
     , scopesRegistries : Scopes ( Bytes CredentialHash, PlutusScript )
     , contingencyPermissions : ( Bytes CredentialHash, PlutusScript )
     , contingencyRegistry : ( Bytes CredentialHash, PlutusScript )
+    , scopesScriptHash : Bytes CredentialHash
     , registriesSeedUtxo : ( OutputReference, Output )
     }
 
@@ -414,7 +416,7 @@ type alias SetupTxs =
 
 
 setupLastStep : Model -> Cip30.Wallet -> LastStepParams -> Result String ( SetupTxs, LoadedTreasury )
-setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, registriesSeedUtxo } =
+setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, scopesScriptHash, registriesSeedUtxo } =
     let
         scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
         scopesTreasuryScriptsResult =
@@ -431,6 +433,9 @@ setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, sc
         contingencyTreasuryResult =
             setupTreasury expiration (Tuple.first contingencyRegistry) (Tuple.first contingencyPermissions) model.scripts.sundaeTreasury
                 |> Result.map (\script -> ( Script.hash <| Script.Plutus script, script ))
+
+        registriesSeedUtxoRef =
+            Tuple.first registriesSeedUtxo
 
         createRegistriesTx : Scopes (Bytes CredentialHash) -> Bytes CredentialHash -> Result String TxFinalized
         createRegistriesTx scopesTreasuryHashes contingencyTreasuryHash =
@@ -453,7 +458,7 @@ setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, sc
                         FromWallet
                             { address = walletAddress
                             , value = twoAda
-                            , guaranteedUtxos = [ Tuple.first registriesSeedUtxo ]
+                            , guaranteedUtxos = [ registriesSeedUtxoRef ]
                             }
 
                     -- Mint the registry token
@@ -552,7 +557,7 @@ setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, sc
                                     }
 
                                 loadedTreasuryResult =
-                                    Result.map2 (LoadedTreasury rootUtxo expiration)
+                                    Result.map2 (LoadedTreasury rootUtxo scopesScriptHash registriesSeedUtxoRef expiration)
                                         (scopesResult registriesTxId txFinalized.tx scopesTreasuries)
                                         (contingencyScopeResult registriesTxId txFinalized.tx contingencyTreasury)
                             in
@@ -811,11 +816,9 @@ pickSeedUtxo localStateUtxos address amount =
 
 type alias LoadedTreasury =
     { rootUtxo : ( OutputReference, Output )
-
-    -- TODO: Add Pragma Scopes script hash?
-    -- TODO: Add Registries seed UTxO?
-    -- TODO: Is there one info that we can use to derive again all useful properties?
-    , expiration : Posix
+    , scopesScriptHash : Bytes CredentialHash -- needed for loading
+    , registriesSeedUtxoRef : OutputReference -- needed for loading
+    , expiration : Posix -- needed for loading
     , scopes : Scopes Scope
     , contingency : Scope
     }
@@ -1980,13 +1983,21 @@ applySundaeTreasuryScript unappliedScript scope =
 upgradeIfTreasuryLoadingFinished : Model -> Model
 upgradeIfTreasuryLoadingFinished model =
     case model.treasuryManagement of
-        TreasuryLoading { rootUtxo, expiration, scopes, contingency } ->
+        TreasuryLoading { rootUtxo, pragmaScriptHash, registriesSeedUtxo, expiration, scopes, contingency } ->
             case ( rootUtxo, upgradeScopesIfLoadingFinished scopes, upgradeScope contingency ) of
                 ( RemoteData.Success ( ref, output ), Just loadedScopes, Just contingencyScope ) ->
                     -- Upgrade the treasury management
                     -- AND the local state utxos
                     { model
-                        | treasuryManagement = TreasuryFullyLoaded { rootUtxo = ( ref, output ), expiration = expiration, scopes = loadedScopes, contingency = contingencyScope }
+                        | treasuryManagement =
+                            TreasuryFullyLoaded
+                                { rootUtxo = ( ref, output )
+                                , scopesScriptHash = pragmaScriptHash
+                                , registriesSeedUtxoRef = registriesSeedUtxo
+                                , expiration = expiration
+                                , scopes = loadedScopes
+                                , contingency = contingencyScope
+                                }
                         , localStateUtxos = addLoadedUtxos ( ref, output ) loadedScopes model.localStateUtxos
                     }
 
@@ -2206,12 +2217,12 @@ viewTreasurySection params treasuryManagement =
         TreasurySetupTxs state ->
             viewSetupTxsState state
 
-        TreasuryLoading { rootUtxo, treasuryConfigExpiration, scopes, contingency } ->
+        TreasuryLoading { rootUtxo, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, scopes, contingency } ->
             div []
                 [ Html.p [] [ text "Loading treasury ... ", spinner ]
                 , viewLoadingRootUtxo rootUtxo
-                , viewPragmaScopesScriptHash params.pragmaScriptHash
-                , viewRegistriesSeedUtxo params.registriesSeedUtxo
+                , viewPragmaScopesScriptHash pragmaScriptHash
+                , viewRegistriesSeedUtxo registriesSeedUtxo
                 , viewExpirationDate <| N.toInt treasuryConfigExpiration
                 , viewLoadingScope "ledger" scopes.ledger
                 , viewLoadingScope "consensus" scopes.consensus
@@ -2220,17 +2231,15 @@ viewTreasurySection params treasuryManagement =
                 , viewLoadingScope "contingency" contingency
                 ]
 
-        TreasuryFullyLoaded { rootUtxo, expiration, scopes, contingency } ->
+        TreasuryFullyLoaded { rootUtxo, scopesScriptHash, registriesSeedUtxoRef, expiration, scopes, contingency } ->
             let
                 rootUtxoRef =
                     Tuple.first rootUtxo
             in
             div []
                 [ Html.p [] [ text "Treasury fully loaded" ]
+                , viewReload scopesScriptHash registriesSeedUtxoRef expiration
                 , viewRootUtxo rootUtxo
-                , viewPragmaScopesScriptHash params.pragmaScriptHash
-                , viewRegistriesSeedUtxo params.registriesSeedUtxo
-                , viewExpirationDate <| Time.posixToMillis expiration
                 , viewScope rootUtxoRef "ledger" scopes.ledger
                 , viewScope rootUtxoRef "consensus" scopes.consensus
                 , viewScope rootUtxoRef "mercenaries" scopes.mercenaries
@@ -2239,14 +2248,24 @@ viewTreasurySection params treasuryManagement =
                 ]
 
 
-viewPragmaScopesScriptHash : String -> Html msg
+viewReload : Bytes CredentialHash -> OutputReference -> Posix -> Html msg
+viewReload scopesScriptHash registriesSeedUtxoRef expiration =
+    Html.div [ HA.style "padding" "16px", HA.style "box-shadow" "0 0 16px rgba(0, 0, 0, 0.2)" ]
+        [ Html.p [] [ Html.strong [] [ text "KEEP this to be able to reload the Treasury:" ] ]
+        , viewPragmaScopesScriptHash scopesScriptHash
+        , viewRegistriesSeedUtxo registriesSeedUtxoRef
+        , viewExpirationDate <| Time.posixToMillis expiration
+        ]
+
+
+viewPragmaScopesScriptHash : Bytes CredentialHash -> Html msg
 viewPragmaScopesScriptHash scriptHash =
-    Html.p [] [ text <| "(PRAGMA) Scopes script hash: " ++ scriptHash ]
+    Html.p [] [ text <| "(PRAGMA) Scopes script hash: " ++ Bytes.toHex scriptHash ]
 
 
-viewRegistriesSeedUtxo : { transactionId : String, outputIndex : Int } -> Html msg
+viewRegistriesSeedUtxo : OutputReference -> Html msg
 viewRegistriesSeedUtxo { transactionId, outputIndex } =
-    Html.p [] [ text <| "Registries Seed UTXO: " ++ transactionId ++ " #" ++ String.fromInt outputIndex ]
+    Html.p [] [ text <| "Registries Seed UTXO: " ++ Bytes.toHex transactionId ++ " #" ++ String.fromInt outputIndex ]
 
 
 viewExpirationDate : Int -> Html msg
