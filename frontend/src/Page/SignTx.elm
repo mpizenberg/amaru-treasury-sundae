@@ -74,6 +74,7 @@ type alias Prep =
 type Subject
     = Unknown
     | TreasurySetup
+    | MergeUtxos
 
 
 initialModel : Subject -> Maybe Prep -> Model
@@ -415,6 +416,9 @@ view ctx model =
 
                             TreasurySetup ->
                                 "Treasury setup"
+
+                            MergeUtxos ->
+                                "Merge UTxOs"
                 in
                 div []
                     [ div []

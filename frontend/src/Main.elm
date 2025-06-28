@@ -895,9 +895,8 @@ type alias MergeTreasuryUtxosState =
 
 type MergeStatus
     = MergeIdle
-    | MergeBuilding (Result TxFinalizationError TxFinalized)
-    | MergeAwaitingSignature Transaction
-    | MergeSubmitting Transaction
+    | MergeBuildingFailure TxFinalizationError
+    | MergeAwaitingSignature (Bytes TransactionId) TxFinalized
 
 
 init : Flags -> ( Model, Cmd Msg )
@@ -1110,7 +1109,9 @@ handleWalletMsg value model =
                                 |> Maybe.map (\{ tx } -> (TxIntent.updateLocalState txId tx model.localStateUtxos).updatedState)
                                 |> Maybe.withDefault model.localStateUtxos
                         , treasuryManagement =
-                            updateTreasuryManagementWithTx txId model.treasuryManagement
+                            updateTreasuryManagementWithTx txId (SignTx.getTxInfo pageModel) model.treasuryManagement
+                        , treasuryAction =
+                            updateTreasuryActionWithTx txId model.treasuryAction
                       }
                     , Cmd.none
                     )
@@ -1157,12 +1158,16 @@ resetSigningStep error page =
             page
 
 
-updateTreasuryManagementWithTx : Bytes TransactionId -> TreasuryManagement -> TreasuryManagement
-updateTreasuryManagementWithTx txId treasuryManagement =
-    case treasuryManagement of
-        TreasurySetupTxs setupState ->
+updateTreasuryManagementWithTx : Bytes TransactionId -> Maybe { a | tx : Transaction } -> TreasuryManagement -> TreasuryManagement
+updateTreasuryManagementWithTx txId maybeTx treasuryManagement =
+    case ( treasuryManagement, maybeTx ) of
+        ( TreasurySetupTxs setupState, Just _ ) ->
             markTxAsSubmitted txId setupState
                 |> upgradeToLoadedIfSetupIsDone
+
+        ( TreasuryFullyLoaded loadedTreasury, Just { tx } ) ->
+            updateTreasuryUtxos txId tx loadedTreasury
+                |> TreasuryFullyLoaded
 
         _ ->
             treasuryManagement
@@ -1191,6 +1196,31 @@ upgradeToLoadedIfSetupIsDone ({ tracking } as state) =
 
         _ ->
             TreasurySetupTxs state
+
+
+updateTreasuryUtxos : Bytes TransactionId -> Transaction -> LoadedTreasury -> LoadedTreasury
+updateTreasuryUtxos txId tx loadedTreasury =
+    -- TODO: Detect all changes to the treasury happening in the Tx
+    loadedTreasury
+
+
+updateTreasuryActionWithTx : Bytes TransactionId -> TreasuryAction -> TreasuryAction
+updateTreasuryActionWithTx txId treasuryAction =
+    case treasuryAction of
+        MergeTreasuryUtxos { status } ->
+            case status of
+                MergeAwaitingSignature txIdWait _ ->
+                    if txId == txIdWait then
+                        NoTreasuryAction
+
+                    else
+                        treasuryAction
+
+                _ ->
+                    treasuryAction
+
+        _ ->
+            treasuryAction
 
 
 
@@ -1478,8 +1508,6 @@ type TreasuryMergingMsg
     = StartMergeUtxos String Scope OutputReference
     | BuildMergeTransaction (List (Bytes CredentialHash))
     | BuildMergeTransactionWithTime (List (Bytes CredentialHash)) Posix
-    | SignMergeTransaction Transaction
-    | SubmitMergeTransaction Transaction
     | CancelMergeAction
 
 
@@ -1496,12 +1524,6 @@ handleTreasuryMergingMsg msg model =
 
         BuildMergeTransactionWithTime requiredSigners currentTime ->
             handleBuildMergeTransaction model requiredSigners currentTime
-
-        SignMergeTransaction transaction ->
-            handleSignMergeTransaction transaction model
-
-        SubmitMergeTransaction transaction ->
-            handleSubmitMergeTransaction transaction model
 
         CancelMergeAction ->
             ( { model | treasuryAction = NoTreasuryAction }, Cmd.none )
@@ -1577,52 +1599,17 @@ handleBuildMergeTransaction model requiredSigners currentTime =
                         mergeTxIntents
 
                 updatedMergeState =
-                    { mergeState | status = MergeBuilding txResult }
+                    case txResult of
+                        Ok ({ tx } as txFinalized) ->
+                            { mergeState | status = MergeAwaitingSignature (Transaction.computeTxId tx) txFinalized }
+
+                        Err err ->
+                            { mergeState | status = MergeBuildingFailure err }
 
                 updatedModel =
                     { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
             in
             ( updatedModel, Cmd.none )
-
-        _ ->
-            ( model, Cmd.none )
-
-
-handleSignMergeTransaction : Transaction -> Model -> ( Model, Cmd Msg )
-handleSignMergeTransaction tx model =
-    case ( model.treasuryAction, model.connectedWallet ) of
-        ( MergeTreasuryUtxos mergeState, Just wallet ) ->
-            let
-                updatedMergeState =
-                    { mergeState | status = MergeAwaitingSignature tx }
-
-                updatedModel =
-                    { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
-
-                signCmd =
-                    toWallet <| Cip30.encodeRequest <| Cip30.signTx wallet { partialSign = True } tx
-            in
-            ( updatedModel, signCmd )
-
-        _ ->
-            ( model, Cmd.none )
-
-
-handleSubmitMergeTransaction : Transaction -> Model -> ( Model, Cmd Msg )
-handleSubmitMergeTransaction tx model =
-    case ( model.treasuryAction, model.connectedWallet ) of
-        ( MergeTreasuryUtxos mergeState, Just wallet ) ->
-            let
-                updatedMergeState =
-                    { mergeState | status = MergeSubmitting tx }
-
-                updatedModel =
-                    { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
-
-                submitCmd =
-                    toWallet <| Cip30.encodeRequest <| Cip30.submitTx wallet tx
-            in
-            ( updatedModel, submitCmd )
 
         _ ->
             ( model, Cmd.none )
@@ -2068,6 +2055,9 @@ view model =
                                     GoToHomePage
 
                                 SignTx.TreasurySetup ->
+                                    GoToHomePage
+
+                                SignTx.MergeUtxos ->
                                     GoToHomePage
                     , wallet = model.connectedWallet
                     , networkId = model.networkId
@@ -2616,20 +2606,20 @@ spinner =
 
 viewMergeUtxosAction : Maybe Cip30.Wallet -> MergeTreasuryUtxosState -> Html Msg
 viewMergeUtxosAction maybeWallet mergeState =
-    Html.map TreasuryMergingMsg <|
-        div []
-            [ Html.h3 [] [ text ("Merge UTXOs - " ++ mergeState.scopeName ++ " Scope") ]
-            , div [] [ text ("UTXOs to merge: " ++ String.fromInt (Dict.Any.size mergeState.scope.treasuryUtxos)) ]
-            , Html.ul [] <|
-                List.map viewDetailedUtxo (Dict.Any.toList mergeState.scope.treasuryUtxos)
-            , case mergeState.status of
-                MergeIdle ->
-                    let
-                        -- FIXME: temporary, something more robust should be done,
-                        -- and not inside the view, but this works as a MVP.
-                        requiredSigners =
-                            MultisigScript.extractRequiredSigners mergeState.scope.owner
-                    in
+    div []
+        [ Html.h3 [] [ text ("Merge UTXOs - " ++ mergeState.scopeName ++ " Scope") ]
+        , div [] [ text ("UTXOs to merge: " ++ String.fromInt (Dict.Any.size mergeState.scope.treasuryUtxos)) ]
+        , Html.ul [] <|
+            List.map viewDetailedUtxo (Dict.Any.toList mergeState.scope.treasuryUtxos)
+        , case mergeState.status of
+            MergeIdle ->
+                let
+                    -- FIXME: temporary, something more robust should be done,
+                    -- and not inside the view, but this works as a MVP.
+                    requiredSigners =
+                        MultisigScript.extractRequiredSigners mergeState.scope.owner
+                in
+                Html.map TreasuryMergingMsg <|
                     case maybeWallet of
                         Nothing ->
                             div []
@@ -2644,29 +2634,31 @@ viewMergeUtxosAction maybeWallet mergeState =
                                 , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
                                 ]
 
-                MergeBuilding txFinalizedResult ->
-                    case txFinalizedResult of
-                        Err error ->
-                            div []
-                                [ Html.p [] [ text "Failed to build the Tx, with error:" ]
-                                , Html.pre [] [ text <| TxIntent.errorToString error ]
-                                , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
-                                ]
-
-                        Ok { tx, expectedSignatures } ->
-                            div []
-                                [ Html.p [] [ text "Merge Tx to be signed:" ]
-                                , Html.pre [] [ text <| prettyTx tx ]
-                                , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
-                                ]
-
-                MergeAwaitingSignature transaction ->
+            MergeBuildingFailure error ->
+                Html.map TreasuryMergingMsg <|
                     div []
-                        [ Html.p [] [ text "Transaction built successfully. Please sign the transaction." ]
-                        , Html.button [ onClick (SignMergeTransaction transaction) ] [ text "Sign Transaction" ]
+                        [ Html.p [] [ text "Failed to build the Tx, with error:" ]
+                        , Html.pre [] [ text <| TxIntent.errorToString error ]
                         , Html.button [ onClick CancelMergeAction ] [ text "Cancel" ]
                         ]
 
-                MergeSubmitting transaction ->
-                    div [] [ text " Submitting transaction...", spinner ]
-            ]
+            MergeAwaitingSignature txId { tx, expectedSignatures } ->
+                let
+                    signingPrep =
+                        { txId = txId
+                        , tx = tx
+                        , expectedSignatures = expectedSignatures
+
+                        -- signerDescriptions : BytesMap CredentialHash String
+                        , signerDescriptions = Bytes.Map.empty
+                        }
+                in
+                div []
+                    [ Html.p [] [ text "Transaction built successfully." ]
+                    , Html.pre [] [ text <| prettyTx tx ]
+                    , Html.button
+                        [ onClick <| SignTxButtonClicked SignTx.MergeUtxos signingPrep ]
+                        [ text "Sign on signing page" ]
+                    , Html.button [ onClick <| TreasuryMergingMsg CancelMergeAction ] [ text "Cancel" ]
+                    ]
+        ]
