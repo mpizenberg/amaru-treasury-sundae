@@ -419,7 +419,7 @@ setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, sc
         scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
         scopesTreasuryScriptsResult =
             scopesToResult <|
-                scopesMap2 (\( registryHash, _ ) ( permissionsHash, _ ) -> setupTreasury model registryHash permissionsHash)
+                scopesMap2 (\( registryHash, _ ) ( permissionsHash, _ ) -> setupTreasury expiration registryHash permissionsHash model.scripts.sundaeTreasury)
                     scopesRegistries
                     scopesPermissions
 
@@ -429,7 +429,7 @@ setupLastStep model connectedWallet { txs, rootUtxo, expiration, scopeOwners, sc
 
         contingencyTreasuryResult : Result String ( Bytes CredentialHash, PlutusScript )
         contingencyTreasuryResult =
-            setupTreasury model (Tuple.first contingencyRegistry) (Tuple.first contingencyPermissions)
+            setupTreasury expiration (Tuple.first contingencyRegistry) (Tuple.first contingencyPermissions) model.scripts.sundaeTreasury
                 |> Result.map (\script -> ( Script.hash <| Script.Plutus script, script ))
 
         createRegistriesTx : Scopes (Bytes CredentialHash) -> Bytes CredentialHash -> Result String TxFinalized
@@ -723,8 +723,8 @@ setupRegistries registryTrapScript registriesSeedUtxo =
     Result.map2 Tuple.pair scopesRegistries contingencyRegistry
 
 
-setupTreasury : Model -> Bytes CredentialHash -> Bytes CredentialHash -> Result String PlutusScript
-setupTreasury model registryScriptHash permissionsScriptHash =
+setupTreasury : Posix -> Bytes CredentialHash -> Bytes CredentialHash -> PlutusScript -> Result String PlutusScript
+setupTreasury expiration registryScriptHash permissionsScriptHash sundaeTreasuryScript =
     let
         multisig =
             MultisigScript.Script permissionsScriptHash
@@ -738,11 +738,11 @@ setupTreasury model registryScriptHash permissionsScriptHash =
                 , fund = MultisigScript.AnyOf []
                 , disburse = multisig
                 }
-            , expiration = N.fromSafeInt model.treasuryLoadingParams.treasuryConfigExpiration
+            , expiration = N.fromSafeInt <| Time.posixToMillis expiration
             , payoutUpperbound = N.zero
             }
     in
-    Treasury.initializeScript treasuryConfig model.scripts.sundaeTreasury
+    Treasury.initializeScript treasuryConfig sundaeTreasuryScript
 
 
 setupScope : Bytes TransactionId -> Transaction -> MultisigScript -> Bytes CredentialHash -> ( Bytes CredentialHash, PlutusScript ) -> ( Bytes CredentialHash, PlutusScript ) -> Result String Scope
@@ -1542,10 +1542,9 @@ handleBuildMergeTransaction model requiredSigners currentTime =
                             Uplc.slotConfigPreview
 
                 slot60sAgo =
-                    -- (Time.posixToMillis currentTime - 1000 * 60)
-                    --     |> Time.millisToPosix
-                    --     |> Uplc.timeToSlot slotConfig
-                    N.zero
+                    (Time.posixToMillis currentTime - 1000 * 60)
+                        |> Time.millisToPosix
+                        |> Uplc.timeToSlot slotConfig
 
                 slotIn6Hours =
                     (Time.posixToMillis currentTime + 1000 * 3600 * 6)
