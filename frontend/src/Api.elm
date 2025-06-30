@@ -97,9 +97,6 @@ retrieveScriptRefUtxos db networkId scriptHash =
     let
         url =
             koiosUrl networkId ++ "/script_utxos?_script_hash=" ++ Bytes.toHex scriptHash
-
-        _ =
-            Debug.log "Retrieving script UTxOs for" url
     in
     ConcurrentTask.Http.get
         { url = url

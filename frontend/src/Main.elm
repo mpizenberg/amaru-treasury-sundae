@@ -18,6 +18,7 @@ import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference, 
 import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
 import ConcurrentTask exposing (ConcurrentTask)
+import ConcurrentTask.Extra
 import Dict
 import Dict.Any
 import Html exposing (Html, div, text)
@@ -125,6 +126,7 @@ type TaskCompleted
     = LoadedPragmaUtxo ( OutputReference, Output )
     | LoadedRegistryUtxos ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
     | LoadedTreasuriesUtxos ( Scopes (Utxo.RefDict Output), Utxo.RefDict Output )
+    | LoadedTreasuryRefScript (Bytes CredentialHash) (Maybe ( OutputReference, Output ))
 
 
 
@@ -296,6 +298,7 @@ type alias LoadingScope =
     { owner : Maybe MultisigScript
     , permissionsScriptApplied : ( Bytes CredentialHash, PlutusScript )
     , sundaeTreasuryScriptApplied : RemoteData String ( Bytes CredentialHash, PlutusScript )
+    , sundaeTreasuryScriptPublished : RemoteData String (Maybe ( OutputReference, Output ))
     , registryNftPolicyId : Bytes PolicyId
     , registryUtxo : RemoteData String ( OutputReference, Output )
     , treasuryUtxos : RemoteData String (Utxo.RefDict Output)
@@ -324,6 +327,7 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
             { owner = Nothing
             , permissionsScriptApplied = ( Script.hash <| Script.Plutus permissionsScript, permissionsScript )
             , sundaeTreasuryScriptApplied = RemoteData.Loading
+            , sundaeTreasuryScriptPublished = RemoteData.Loading
             , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
             , registryUtxo = RemoteData.Loading
             , treasuryUtxos = RemoteData.NotAsked
@@ -776,6 +780,7 @@ setupScope txId registryTx scopeOwner registryScriptHash permissions treasury =
                 { owner = scopeOwner
                 , permissionsScript = permissions
                 , sundaeTreasuryScript = treasury
+                , sundaeTreasuryScriptRef = Nothing
                 , registryUtxo = utxo
                 , treasuryUtxos = Utxo.emptyRefDict
                 }
@@ -873,6 +878,7 @@ type alias Scope =
     { owner : MultisigScript
     , permissionsScript : ( Bytes CredentialHash, PlutusScript )
     , sundaeTreasuryScript : ( Bytes CredentialHash, PlutusScript )
+    , sundaeTreasuryScriptRef : Maybe ( OutputReference, Output )
     , registryUtxo : ( OutputReference, Output )
 
     -- TODO: make sure they are updated after every Tx
@@ -1801,12 +1807,34 @@ handleCompletedTask model taskCompleted =
                                                     Debug.log "utxosInList" utxosInList
                                             in
                                             ConcurrentTask.fail "Something unexpected happened while trying to retrieve scopes treasuries UTxOs"
+
+                                allTreasuryRefScriptsUtxosTask : List (ConcurrentTask String TaskCompleted)
+                                allTreasuryRefScriptsUtxosTask =
+                                    allTreasuriesScriptHashes
+                                        |> List.map
+                                            (\hash ->
+                                                Api.retrieveScriptRefUtxos { db = model.db } model.networkId hash
+                                                    |> ConcurrentTask.map
+                                                        (\utxos ->
+                                                            Dict.Any.toList utxos
+                                                                |> List.head
+                                                                |> LoadedTreasuryRefScript hash
+                                                        )
+                                            )
+
+                                ( updatedAgainTaskPool, loadTreasuryRefScriptsCmds ) =
+                                    allTreasuryRefScriptsUtxosTask
+                                        |> ConcurrentTask.Extra.attemptEach
+                                            { pool = updatedTaskPool
+                                            , send = sendTask
+                                            , onComplete = OnTaskComplete
+                                            }
                             in
                             ( { model
                                 | treasuryManagement = treasuryManagement
-                                , taskPool = updatedTaskPool
+                                , taskPool = updatedAgainTaskPool
                               }
-                            , loadScopeUtxosCmd
+                            , Cmd.batch (loadScopeUtxosCmd :: loadTreasuryRefScriptsCmds)
                             )
 
                         Err error ->
@@ -1816,62 +1844,68 @@ handleCompletedTask model taskCompleted =
                     ( model, Cmd.none )
 
         LoadedRegistryUtxos ( registryUtxos, contingencyUtxo ) ->
-            case model.treasuryManagement of
-                TreasuryLoading ({ scopes, contingency } as loadingTreasury) ->
-                    -- If all UTxOs have been loaded (registry and scope)
-                    -- then we can convert into a LoadedTreasury
-                    ( { model
-                        | treasuryManagement =
-                            TreasuryLoading
-                                { loadingTreasury
-                                    | scopes = setRegistryUtxos registryUtxos scopes
-                                    , contingency = { contingency | registryUtxo = RemoteData.Success contingencyUtxo }
-                                }
-                      }
-                        |> upgradeIfTreasuryLoadingFinished
-                    , Cmd.none
-                    )
-
-                _ ->
-                    ( model, Cmd.none )
+            updateTreasuryLoading model <|
+                \({ scopes, contingency } as loadingTreasury) ->
+                    { loadingTreasury
+                        | scopes = setRegistryUtxos registryUtxos scopes
+                        , contingency = { contingency | registryUtxo = RemoteData.Success contingencyUtxo }
+                    }
 
         LoadedTreasuriesUtxos ( treasuriesUtxos, contingencyUtxos ) ->
-            case model.treasuryManagement of
-                TreasuryLoading ({ scopes, contingency } as loadingTreasury) ->
-                    -- If all UTxOs have been loaded (registry and scope)
-                    -- then we can convert into a LoadedTreasury
-                    ( { model
-                        | treasuryManagement =
-                            TreasuryLoading
-                                { loadingTreasury
-                                    | scopes = setTreasuryUtxos treasuriesUtxos scopes
-                                    , contingency = { contingency | treasuryUtxos = RemoteData.Success contingencyUtxos }
-                                }
-                      }
-                        |> upgradeIfTreasuryLoadingFinished
-                    , Cmd.none
-                    )
+            updateTreasuryLoading model <|
+                \({ scopes, contingency } as loadingTreasury) ->
+                    { loadingTreasury
+                        | scopes = setTreasuryUtxos treasuriesUtxos scopes
+                        , contingency = { contingency | treasuryUtxos = RemoteData.Success contingencyUtxos }
+                    }
 
-                _ ->
-                    ( model, Cmd.none )
+        LoadedTreasuryRefScript scriptHash maybeUtxo ->
+            let
+                updateTreasuryRefScriptIfGoodScope scope =
+                    -- This should always happen at a time where the treasury scripts are known,
+                    -- so we should always be in a RemoteData.Success state.
+                    case scope.sundaeTreasuryScriptApplied of
+                        RemoteData.Success ( hash, _ ) ->
+                            if hash == scriptHash then
+                                { scope | sundaeTreasuryScriptPublished = RemoteData.Success maybeUtxo }
+
+                            else
+                                scope
+
+                        _ ->
+                            scope
+            in
+            updateTreasuryLoading model <|
+                \({ scopes, contingency } as loadingTreasury) ->
+                    { loadingTreasury
+                        | scopes = scopesMap updateTreasuryRefScriptIfGoodScope scopes
+                        , contingency = updateTreasuryRefScriptIfGoodScope contingency
+                    }
+
+
+updateTreasuryLoading : Model -> (LoadingTreasury -> LoadingTreasury) -> ( Model, Cmd Msg )
+updateTreasuryLoading model f =
+    case model.treasuryManagement of
+        TreasuryLoading loadingTreasury ->
+            ( { model | treasuryManagement = TreasuryLoading (f loadingTreasury) }
+                -- If everything has loaded,
+                -- then we can convert into a LoadedTreasury
+                |> upgradeIfTreasuryLoadingFinished
+            , Cmd.none
+            )
+
+        _ ->
+            ( model, Cmd.none )
 
 
 setRegistryUtxos : Scopes ( OutputReference, Output ) -> Scopes LoadingScope -> Scopes LoadingScope
-setRegistryUtxos registryUtxos { ledger, consensus, mercenaries, marketing } =
-    { ledger = { ledger | registryUtxo = RemoteData.Success registryUtxos.ledger }
-    , consensus = { consensus | registryUtxo = RemoteData.Success registryUtxos.consensus }
-    , mercenaries = { mercenaries | registryUtxo = RemoteData.Success registryUtxos.mercenaries }
-    , marketing = { marketing | registryUtxo = RemoteData.Success registryUtxos.marketing }
-    }
+setRegistryUtxos registryUtxos scopes =
+    scopesMap2 (\utxo loadingScope -> { loadingScope | registryUtxo = RemoteData.Success utxo }) registryUtxos scopes
 
 
 setTreasuryUtxos : Scopes (Utxo.RefDict Output) -> Scopes LoadingScope -> Scopes LoadingScope
-setTreasuryUtxos treasuryUtxos { ledger, consensus, mercenaries, marketing } =
-    { ledger = { ledger | treasuryUtxos = RemoteData.Success treasuryUtxos.ledger }
-    , consensus = { consensus | treasuryUtxos = RemoteData.Success treasuryUtxos.consensus }
-    , mercenaries = { mercenaries | treasuryUtxos = RemoteData.Success treasuryUtxos.mercenaries }
-    , marketing = { marketing | treasuryUtxos = RemoteData.Success treasuryUtxos.marketing }
-    }
+setTreasuryUtxos treasuryUtxos scopes =
+    scopesMap2 (\utxos loadingScope -> { loadingScope | treasuryUtxos = RemoteData.Success utxos }) treasuryUtxos scopes
 
 
 {-| Extract the scopes owner config from the root pragma utxo.
@@ -1985,7 +2019,7 @@ upgradeIfTreasuryLoadingFinished model =
                                 , scopes = loadedScopes
                                 , contingency = contingencyScope
                                 }
-                        , localStateUtxos = addLoadedUtxos ( ref, output ) loadedScopes model.localStateUtxos
+                        , localStateUtxos = addLoadedUtxos ( ref, output ) loadedScopes contingencyScope model.localStateUtxos
                     }
 
                 _ ->
@@ -2006,12 +2040,14 @@ upgradeScopesIfLoadingFinished { ledger, consensus, mercenaries, marketing } =
 
 upgradeScope : LoadingScope -> Maybe Scope
 upgradeScope scope =
-    case ( scope.sundaeTreasuryScriptApplied, scope.registryUtxo, scope.treasuryUtxos ) of
-        ( RemoteData.Success treasuryScriptApplied, RemoteData.Success registryUtxo, RemoteData.Success treasuryUtxos ) ->
+    -- TODO: check for treasury ref scripts
+    case ( ( scope.sundaeTreasuryScriptApplied, scope.sundaeTreasuryScriptPublished ), scope.registryUtxo, scope.treasuryUtxos ) of
+        ( ( RemoteData.Success treasuryScriptApplied, RemoteData.Success maybeUtxo ), RemoteData.Success registryUtxo, RemoteData.Success treasuryUtxos ) ->
             Just
                 { owner = scope.owner |> Maybe.withDefault (MultisigScript.AnyOf [])
                 , permissionsScript = scope.permissionsScriptApplied
                 , sundaeTreasuryScript = treasuryScriptApplied
+                , sundaeTreasuryScriptRef = maybeUtxo
                 , registryUtxo = registryUtxo
                 , treasuryUtxos = treasuryUtxos
                 }
@@ -2020,17 +2056,22 @@ upgradeScope scope =
             Nothing
 
 
-addLoadedUtxos : ( OutputReference, Output ) -> Scopes Scope -> Utxo.RefDict Output -> Utxo.RefDict Output
-addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketing } localState =
+addLoadedUtxos : ( OutputReference, Output ) -> Scopes Scope -> Scope -> Utxo.RefDict Output -> Utxo.RefDict Output
+addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketing } contingency localState =
     let
         addScopeUtxos scope accum =
             Dict.Any.union scope.treasuryUtxos accum
                 |> Dict.Any.insert (Tuple.first scope.registryUtxo) (Tuple.second scope.registryUtxo)
+                |> (scope.sundaeTreasuryScriptRef
+                        |> Maybe.map (\( ref, output ) -> Dict.Any.insert ref output)
+                        |> Maybe.withDefault identity
+                   )
     in
     addScopeUtxos ledger localState
         |> addScopeUtxos consensus
         |> addScopeUtxos mercenaries
         |> addScopeUtxos marketing
+        |> addScopeUtxos contingency
         |> Dict.Any.insert rootRef rootOutput
 
 
@@ -2448,12 +2489,13 @@ viewRootUtxo ( ref, _ ) =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, registryNftPolicyId, registryUtxo, treasuryUtxos } =
+viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, sundaeTreasuryScriptPublished, registryNftPolicyId, registryUtxo, treasuryUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewMaybeOwner owner
         , viewPermissionsScript permissionsScriptApplied
         , viewLoadingTreasuryScript sundaeTreasuryScriptApplied
+        , viewLoadingTreasuryScriptRef sundaeTreasuryScriptPublished
         , viewRegistryNftPolicyId registryNftPolicyId
         , viewLoadingRegistryUtxo registryUtxo
         , viewLoadingTreasuryUtxos treasuryUtxos
@@ -2472,12 +2514,13 @@ viewScopeSetup scopeName { owner, permissionsScript, sundaeTreasuryScript, regis
 
 
 viewScope : OutputReference -> String -> Scope -> Html Msg
-viewScope rootUtxo scopeName ({ owner, permissionsScript, sundaeTreasuryScript, registryUtxo, treasuryUtxos } as scope) =
+viewScope rootUtxo scopeName ({ owner, permissionsScript, sundaeTreasuryScript, sundaeTreasuryScriptRef, registryUtxo, treasuryUtxos } as scope) =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
         , viewPermissionsScript permissionsScript
         , viewTreasuryScript sundaeTreasuryScript
+        , viewTreasuryScriptRef sundaeTreasuryScriptRef
         , viewRegistryUtxo registryUtxo
         , viewTreasuryUtxos scopeName scope rootUtxo treasuryUtxos
         ]
@@ -2522,6 +2565,36 @@ viewLoadingTreasuryScript remoteData =
 viewTreasuryScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
 viewTreasuryScript ( hash, _ ) =
     Html.p [] [ text <| "Fully applied Sundae treasury script hash: " ++ Bytes.toHex hash ]
+
+
+viewLoadingTreasuryScriptRef : RemoteData String (Maybe ( OutputReference, Output )) -> Html msg
+viewLoadingTreasuryScriptRef remoteData =
+    case remoteData of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Sundae treasury script ref not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Sundae treasury script ref loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Sundae treasury script ref failed to load: " ++ error ]
+
+        RemoteData.Success maybeUtxo ->
+            viewTreasuryScriptRef maybeUtxo
+
+
+viewTreasuryScriptRef : Maybe ( OutputReference, Output ) -> Html msg
+viewTreasuryScriptRef maybeUtxo =
+    case maybeUtxo of
+        Just ( ref, _ ) ->
+            Html.p [] [ text <| "Treasury script ref UTxO: " ++ Utxo.refAsString ref ]
+
+        Nothing ->
+            Html.p []
+                [ text <| "Treasury script ref not published yet. "
+
+                -- TODO: add a button to publish the script
+                ]
 
 
 viewRegistryNftPolicyId : Bytes PolicyId -> Html msg
