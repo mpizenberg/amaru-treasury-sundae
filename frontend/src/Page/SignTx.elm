@@ -75,6 +75,7 @@ type Subject
     = Unknown
     | TreasurySetup
     | MergeUtxos
+    | PublishScript (Bytes CredentialHash)
 
 
 initialModel : Subject -> Maybe Prep -> Model
@@ -406,8 +407,10 @@ view ctx model =
                                     ]
                                     [ text <| "View on CardanoScan ↗" ]
                                 ]
-                            , Html.p [] [ Html.button [ onClick <| ctx.toCallbackPage subject ] [ text <| "Back to page: " ++ callbackPageName ] ]
                             ]
+
+                    callbackButton =
+                        Html.p [] [ Html.button [ onClick <| ctx.toCallbackPage subject ] [ text <| "Back to page: " ++ callbackPageName ] ]
 
                     callbackPageName =
                         case subject of
@@ -419,6 +422,9 @@ view ctx model =
 
                             MergeUtxos ->
                                 "Merge UTxOs"
+
+                            PublishScript _ ->
+                                "Treasury management"
                 in
                 div []
                     [ div []
@@ -463,6 +469,7 @@ view ctx model =
 
                       else
                         text ""
+                    , callbackButton
                     , viewError error
                     ]
         ]

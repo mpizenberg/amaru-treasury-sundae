@@ -9,7 +9,7 @@ import Cardano.Cip30 as Cip30
 import Cardano.CoinSelection as CoinSelection
 import Cardano.Data as Data exposing (Data)
 import Cardano.MultiAsset as MultiAsset exposing (MultiAsset, PolicyId)
-import Cardano.Script as Script exposing (PlutusScript, PlutusVersion(..), ScriptCbor)
+import Cardano.Script as Script exposing (NativeScript(..), PlutusScript, PlutusVersion(..), ScriptCbor)
 import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxExamples exposing (prettyTx)
 import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalizationError, TxFinalized, TxIntent, TxOtherInfo)
@@ -117,6 +117,7 @@ type Msg
     | TreasuryLoadingParamsMsg TreasuryLoadingParamsMsg
     | StartTreasuryLoading
     | TreasuryMergingMsg TreasuryMergingMsg
+    | PublishScript (Bytes CredentialHash) PlutusScript
       -- Task port
     | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
     | OnTaskComplete (ConcurrentTask.Response String TaskCompleted)
@@ -1053,6 +1054,9 @@ update msg model =
         TreasuryMergingMsg submsg ->
             handleTreasuryMergingMsg submsg model
 
+        PublishScript hash script ->
+            createPublishScriptTx hash script model
+
         -- Task port
         OnTaskProgress ( taskPool, cmd ) ->
             ( { model | taskPool = taskPool }, cmd )
@@ -1504,6 +1508,68 @@ startTreasuryLoading model =
 
         Err error ->
             ( { model | error = Just error }, Cmd.none )
+
+
+
+-- Publish the Script
+
+
+createPublishScriptTx : Bytes CredentialHash -> PlutusScript -> Model -> ( Model, Cmd msg )
+createPublishScriptTx hash script model =
+    case model.connectedWallet of
+        Nothing ->
+            ( { model | error = Just "Please connect your wallet to be able to create a Tx" }, Cmd.none )
+
+        Just wallet ->
+            let
+                walletAddress =
+                    Cip30.walletChangeAddress wallet
+
+                walletKey =
+                    Address.extractPubKeyHash walletAddress
+                        |> Maybe.withDefault (Bytes.dummy 28 "")
+
+                -- TODO: for now this is published in a multisig with just the wallet key
+                utxoAddress =
+                    Address.script model.networkId <| Script.hash <| Script.Native <| ScriptPubkey walletKey
+
+                scriptUtxo =
+                    Utxo.withMinAda <|
+                        { address = utxoAddress
+                        , amount = Value.zero
+                        , datumOption = Nothing
+                        , referenceScript = Just <| Script.refFromScript <| Script.Plutus script
+                        }
+
+                publishIntents =
+                    [ TxIntent.Spend <|
+                        FromWallet
+                            { address = walletAddress
+                            , value = scriptUtxo.amount
+                            , guaranteedUtxos = []
+                            }
+                    , TxIntent.SendToOutput scriptUtxo
+                    ]
+
+                txResult =
+                    TxIntent.finalize model.localStateUtxos [] publishIntents
+            in
+            case txResult of
+                Err err ->
+                    ( { model | error = Just <| TxIntent.errorToString err }, Cmd.none )
+
+                Ok { tx, expectedSignatures } ->
+                    let
+                        signingPrep =
+                            { txId = Transaction.computeTxId tx
+                            , tx = tx
+                            , expectedSignatures = expectedSignatures
+
+                            -- signerDescriptions : BytesMap CredentialHash String
+                            , signerDescriptions = Bytes.Map.empty
+                            }
+                    in
+                    ( { model | page = SignTxPage <| SignTx.initialModel (SignTx.PublishScript hash) (Just signingPrep) }, Cmd.none )
 
 
 
@@ -2100,6 +2166,9 @@ view model =
 
                                 SignTx.MergeUtxos ->
                                     GoToHomePage
+
+                                SignTx.PublishScript _ ->
+                                    GoToHomePage
                     , wallet = model.connectedWallet
                     , networkId = model.networkId
                     }
@@ -2520,7 +2589,7 @@ viewScope rootUtxo scopeName ({ owner, permissionsScript, sundaeTreasuryScript, 
         , viewOwner owner
         , viewPermissionsScript permissionsScript
         , viewTreasuryScript sundaeTreasuryScript
-        , viewTreasuryScriptRef sundaeTreasuryScriptRef
+        , viewTreasuryScriptRef (Tuple.first sundaeTreasuryScript) (Tuple.second sundaeTreasuryScript) sundaeTreasuryScriptRef
         , viewRegistryUtxo registryUtxo
         , viewTreasuryUtxos scopeName scope rootUtxo treasuryUtxos
         ]
@@ -2580,11 +2649,16 @@ viewLoadingTreasuryScriptRef remoteData =
             Html.p [] [ text <| "Sundae treasury script ref failed to load: " ++ error ]
 
         RemoteData.Success maybeUtxo ->
-            viewTreasuryScriptRef maybeUtxo
+            case maybeUtxo of
+                Just ( ref, _ ) ->
+                    Html.p [] [ text <| "Treasury script ref UTxO: " ++ Utxo.refAsString ref ]
+
+                Nothing ->
+                    Html.p [] [ text <| "Treasury script ref not published yet." ]
 
 
-viewTreasuryScriptRef : Maybe ( OutputReference, Output ) -> Html msg
-viewTreasuryScriptRef maybeUtxo =
+viewTreasuryScriptRef : Bytes CredentialHash -> PlutusScript -> Maybe ( OutputReference, Output ) -> Html Msg
+viewTreasuryScriptRef hash script maybeUtxo =
     case maybeUtxo of
         Just ( ref, _ ) ->
             Html.p [] [ text <| "Treasury script ref UTxO: " ++ Utxo.refAsString ref ]
@@ -2592,8 +2666,7 @@ viewTreasuryScriptRef maybeUtxo =
         Nothing ->
             Html.p []
                 [ text <| "Treasury script ref not published yet. "
-
-                -- TODO: add a button to publish the script
+                , Html.button [ onClick <| PublishScript hash script ] [ text "Publish script in a ref UTxO" ]
                 ]
 
 
