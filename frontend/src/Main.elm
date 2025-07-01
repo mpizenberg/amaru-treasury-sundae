@@ -128,6 +128,7 @@ type TaskCompleted
     | LoadedRegistryUtxos ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
     | LoadedTreasuriesUtxos ( Scopes (Utxo.RefDict Output), Utxo.RefDict Output )
     | LoadedTreasuryRefScript (Bytes CredentialHash) (Maybe ( OutputReference, Output ))
+    | LoadedPermissionsRefScript (Bytes CredentialHash) (Maybe ( OutputReference, Output ))
 
 
 
@@ -298,6 +299,7 @@ initLoadingTreasury unappliedScopePermissionScript unappliedRegistryTrapScript p
 type alias LoadingScope =
     { owner : Maybe MultisigScript
     , permissionsScriptApplied : ( Bytes CredentialHash, PlutusScript )
+    , permissionsScriptPublished : RemoteData String (Maybe ( OutputReference, Output ))
     , sundaeTreasuryScriptApplied : RemoteData String ( Bytes CredentialHash, PlutusScript )
     , sundaeTreasuryScriptPublished : RemoteData String (Maybe ( OutputReference, Output ))
     , registryNftPolicyId : Bytes PolicyId
@@ -327,6 +329,7 @@ initLoadingScope unappliedScopePermissionScript pragmaScriptHash unappliedRegist
         loadingScope permissionsScript registryScript =
             { owner = Nothing
             , permissionsScriptApplied = ( Script.hash <| Script.Plutus permissionsScript, permissionsScript )
+            , permissionsScriptPublished = RemoteData.Loading
             , sundaeTreasuryScriptApplied = RemoteData.Loading
             , sundaeTreasuryScriptPublished = RemoteData.Loading
             , registryNftPolicyId = Script.hash <| Script.Plutus registryScript
@@ -780,6 +783,7 @@ setupScope txId registryTx scopeOwner registryScriptHash permissions treasury =
             (\utxo ->
                 { owner = scopeOwner
                 , permissionsScript = permissions
+                , permissionsScriptRef = Nothing
                 , sundaeTreasuryScript = treasury
                 , sundaeTreasuryScriptRef = Nothing
                 , registryUtxo = utxo
@@ -878,6 +882,7 @@ scopesMap4 f s1 s2 s3 s4 =
 type alias Scope =
     { owner : MultisigScript
     , permissionsScript : ( Bytes CredentialHash, PlutusScript )
+    , permissionsScriptRef : Maybe ( OutputReference, Output )
     , sundaeTreasuryScript : ( Bytes CredentialHash, PlutusScript )
     , sundaeTreasuryScriptRef : Maybe ( OutputReference, Output )
     , registryUtxo : ( OutputReference, Output )
@@ -1406,16 +1411,11 @@ startTreasuryLoading model =
             model.treasuryLoadingParams
 
         -- Load Pragma UTxO
-        ( updatedTaskPool, loadPragmaUtxoCmd ) =
+        loadPragmaUtxoTask =
             Api.retrieveAssetUtxo model.networkId (Bytes.fromHexUnchecked pragmaScriptHash) (Bytes.fromText "amaru scopes")
                 |> ConcurrentTask.mapError Debug.toString
                 |> ConcurrentTask.andThen (Api.retrieveOutput model.networkId)
                 |> ConcurrentTask.map LoadedPragmaUtxo
-                |> ConcurrentTask.attempt
-                    { pool = model.taskPool
-                    , send = sendTask
-                    , onComplete = OnTaskComplete
-                    }
 
         loadingTreasuryResult =
             initLoadingTreasury
@@ -1425,8 +1425,8 @@ startTreasuryLoading model =
                 registriesSeedUtxo
                 treasuryConfigExpiration
 
-        loadRegistryUtxos : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
-        loadRegistryUtxos loadingScopes contingencyScope =
+        loadRegistryUtxosTask : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String TaskCompleted
+        loadRegistryUtxosTask loadingScopes contingencyScope =
             let
                 registryAssetName =
                     Types.registryTokenName
@@ -1480,30 +1480,46 @@ startTreasuryLoading model =
                                     Err <| "Asset in more than 1 outputs! : " ++ Bytes.toHex policyId ++ " / " ++ Bytes.pretty assetName
             in
             ConcurrentTask.andThen extractLoadedUtxos assetsUtxosTask
-
-        attemptLoadRegistryUtxosTask loadingScopes contingencyScope =
-            loadRegistryUtxos loadingScopes contingencyScope
                 |> ConcurrentTask.map LoadedRegistryUtxos
-                |> ConcurrentTask.attempt
-                    { pool = updatedTaskPool
-                    , send = sendTask
-                    , onComplete = OnTaskComplete
-                    }
     in
     case loadingTreasuryResult of
         Ok loadingTreasury ->
             let
-                ( updatedAgainTaskPool, loadRegistryUtxosCmd ) =
-                    attemptLoadRegistryUtxosTask loadingTreasury.scopes loadingTreasury.contingency
+                allPermissionsScriptHashes =
+                    scopesMap (\s -> Tuple.first s.permissionsScriptApplied) loadingTreasury.scopes
+                        |> scopesToList
+                        |> (\list -> list ++ [ Tuple.first loadingTreasury.contingency.permissionsScriptApplied ])
+
+                loadPermissionsRefScriptsUtxosTask : List (ConcurrentTask String TaskCompleted)
+                loadPermissionsRefScriptsUtxosTask =
+                    allPermissionsScriptHashes
+                        |> List.map
+                            (\hash ->
+                                Api.retrieveScriptRefUtxos { db = model.db } model.networkId hash
+                                    |> ConcurrentTask.map
+                                        (\utxos ->
+                                            Dict.Any.toList utxos
+                                                |> List.head
+                                                |> LoadedPermissionsRefScript hash
+                                        )
+                            )
+
+                ( updatedPool, taskCmds ) =
+                    (loadPragmaUtxoTask
+                        :: loadRegistryUtxosTask loadingTreasury.scopes loadingTreasury.contingency
+                        :: loadPermissionsRefScriptsUtxosTask
+                    )
+                        |> ConcurrentTask.Extra.attemptEach
+                            { pool = model.taskPool
+                            , send = sendTask
+                            , onComplete = OnTaskComplete
+                            }
             in
             ( { model
-                | taskPool = updatedAgainTaskPool
+                | taskPool = updatedPool
                 , treasuryManagement = TreasuryLoading loadingTreasury
               }
-            , Cmd.batch
-                [ loadPragmaUtxoCmd
-                , loadRegistryUtxosCmd
-                ]
+            , Cmd.batch taskCmds
             )
 
         Err error ->
@@ -1948,6 +1964,22 @@ handleCompletedTask model taskCompleted =
                         , contingency = updateTreasuryRefScriptIfGoodScope contingency
                     }
 
+        LoadedPermissionsRefScript scriptHash maybeUtxo ->
+            let
+                updatePermissionsRefScriptIfGoodScope scope =
+                    if scriptHash == Tuple.first scope.permissionsScriptApplied then
+                        { scope | permissionsScriptPublished = RemoteData.Success maybeUtxo }
+
+                    else
+                        scope
+            in
+            updateTreasuryLoading model <|
+                \({ scopes, contingency } as loadingTreasury) ->
+                    { loadingTreasury
+                        | scopes = scopesMap updatePermissionsRefScriptIfGoodScope scopes
+                        , contingency = updatePermissionsRefScriptIfGoodScope contingency
+                    }
+
 
 updateTreasuryLoading : Model -> (LoadingTreasury -> LoadingTreasury) -> ( Model, Cmd Msg )
 updateTreasuryLoading model f =
@@ -2107,13 +2139,14 @@ upgradeScopesIfLoadingFinished { ledger, consensus, mercenaries, marketing } =
 upgradeScope : LoadingScope -> Maybe Scope
 upgradeScope scope =
     -- TODO: check for treasury ref scripts
-    case ( ( scope.sundaeTreasuryScriptApplied, scope.sundaeTreasuryScriptPublished ), scope.registryUtxo, scope.treasuryUtxos ) of
-        ( ( RemoteData.Success treasuryScriptApplied, RemoteData.Success maybeUtxo ), RemoteData.Success registryUtxo, RemoteData.Success treasuryUtxos ) ->
+    case ( scope.permissionsScriptPublished, ( scope.sundaeTreasuryScriptApplied, scope.sundaeTreasuryScriptPublished, scope.treasuryUtxos ), scope.registryUtxo ) of
+        ( RemoteData.Success maybePermissionsScriptUtxo, ( RemoteData.Success treasuryScriptApplied, RemoteData.Success maybeTreasuryScriptUtxo, RemoteData.Success treasuryUtxos ), RemoteData.Success registryUtxo ) ->
             Just
                 { owner = scope.owner |> Maybe.withDefault (MultisigScript.AnyOf [])
                 , permissionsScript = scope.permissionsScriptApplied
+                , permissionsScriptRef = maybePermissionsScriptUtxo
                 , sundaeTreasuryScript = treasuryScriptApplied
-                , sundaeTreasuryScriptRef = maybeUtxo
+                , sundaeTreasuryScriptRef = maybeTreasuryScriptUtxo
                 , registryUtxo = registryUtxo
                 , treasuryUtxos = treasuryUtxos
                 }
@@ -2558,11 +2591,12 @@ viewRootUtxo ( ref, _ ) =
 
 
 viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, permissionsScriptApplied, sundaeTreasuryScriptApplied, sundaeTreasuryScriptPublished, registryNftPolicyId, registryUtxo, treasuryUtxos } =
+viewLoadingScope scopeName { owner, permissionsScriptApplied, permissionsScriptPublished, sundaeTreasuryScriptApplied, sundaeTreasuryScriptPublished, registryNftPolicyId, registryUtxo, treasuryUtxos } =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewMaybeOwner owner
         , viewPermissionsScript permissionsScriptApplied
+        , viewLoadingPermissionsScriptRef permissionsScriptPublished
         , viewLoadingTreasuryScript sundaeTreasuryScriptApplied
         , viewLoadingTreasuryScriptRef sundaeTreasuryScriptPublished
         , viewRegistryNftPolicyId registryNftPolicyId
@@ -2583,11 +2617,12 @@ viewScopeSetup scopeName { owner, permissionsScript, sundaeTreasuryScript, regis
 
 
 viewScope : OutputReference -> String -> Scope -> Html Msg
-viewScope rootUtxo scopeName ({ owner, permissionsScript, sundaeTreasuryScript, sundaeTreasuryScriptRef, registryUtxo, treasuryUtxos } as scope) =
+viewScope rootUtxo scopeName ({ owner, permissionsScript, permissionsScriptRef, sundaeTreasuryScript, sundaeTreasuryScriptRef, registryUtxo, treasuryUtxos } as scope) =
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
         , viewOwner owner
         , viewPermissionsScript permissionsScript
+        , viewPermissionsScriptRef (Tuple.first permissionsScript) (Tuple.second permissionsScript) permissionsScriptRef
         , viewTreasuryScript sundaeTreasuryScript
         , viewTreasuryScriptRef (Tuple.first sundaeTreasuryScript) (Tuple.second sundaeTreasuryScript) sundaeTreasuryScriptRef
         , viewRegistryUtxo registryUtxo
@@ -2610,9 +2645,43 @@ viewOwner owner =
     Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
 
 
+viewLoadingPermissionsScriptRef : RemoteData String (Maybe ( OutputReference, Output )) -> Html msg
+viewLoadingPermissionsScriptRef remoteData =
+    case remoteData of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Permissions script ref not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Permissions script ref loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Permissions script ref failed to load: " ++ error ]
+
+        RemoteData.Success maybeUtxo ->
+            case maybeUtxo of
+                Just ( ref, _ ) ->
+                    Html.p [] [ text <| "Permissions script ref UTxO: " ++ Utxo.refAsString ref ]
+
+                Nothing ->
+                    Html.p [] [ text <| "Permissions script ref not published yet." ]
+
+
 viewPermissionsScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
 viewPermissionsScript ( hash, _ ) =
     Html.p [] [ text <| "Fully applied permissions script hash: " ++ Bytes.toHex hash ]
+
+
+viewPermissionsScriptRef : Bytes CredentialHash -> PlutusScript -> Maybe ( OutputReference, Output ) -> Html Msg
+viewPermissionsScriptRef hash script maybeUtxo =
+    case maybeUtxo of
+        Just ( ref, _ ) ->
+            Html.p [] [ text <| "Permissions script ref UTxO: " ++ Utxo.refAsString ref ]
+
+        Nothing ->
+            Html.p []
+                [ text <| "Permissions script ref not published yet. "
+                , Html.button [ onClick <| PublishScript hash script ] [ text "Publish script in a ref UTxO" ]
+                ]
 
 
 viewLoadingTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) -> Html msg
