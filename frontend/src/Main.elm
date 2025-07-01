@@ -116,6 +116,7 @@ type Msg
     | UpdateSetupForm SetupFormMsg
     | TreasuryLoadingParamsMsg TreasuryLoadingParamsMsg
     | StartTreasuryLoading
+    | RefreshTreasuryUtxos
     | TreasuryMergingMsg TreasuryMergingMsg
     | PublishScript (Bytes CredentialHash) PlutusScript
       -- Task port
@@ -248,7 +249,6 @@ type TxState
 type alias LoadingTreasury =
     { pragmaScriptHash : Bytes CredentialHash
     , registriesSeedUtxo : OutputReference
-    , treasuryConfigExpiration : Natural
     , rootUtxo : RemoteData String ( OutputReference, Output )
     , expiration : Posix
     , scopes : Scopes LoadingScope
@@ -265,22 +265,18 @@ initLoadingTreasury unappliedScopePermissionScript unappliedRegistryTrapScript p
         registriesSeedUtxo =
             OutputReference (Bytes.fromHexUnchecked transactionId) outputIndex
 
-        treasuryConfigExpiration =
-            N.fromSafeInt expiration
-
         initLoadingScopeWithIndex index =
             initLoadingScope
                 unappliedScopePermissionScript
                 pragmaScriptHash
                 unappliedRegistryTrapScript
                 registriesSeedUtxo
-                treasuryConfigExpiration
+                (N.fromSafeInt expiration)
                 index
 
         loadingTreasury ledger consensus mercenaries marketing contingency =
             { pragmaScriptHash = pragmaScriptHash
             , registriesSeedUtxo = registriesSeedUtxo
-            , treasuryConfigExpiration = treasuryConfigExpiration
             , rootUtxo = RemoteData.Loading
             , expiration = Time.millisToPosix expiration
             , scopes = Scopes ledger consensus mercenaries marketing
@@ -1056,6 +1052,9 @@ update msg model =
         StartTreasuryLoading ->
             startTreasuryLoading model
 
+        RefreshTreasuryUtxos ->
+            refreshTreasuryUtxos model
+
         TreasuryMergingMsg submsg ->
             handleTreasuryMergingMsg submsg model
 
@@ -1524,6 +1523,102 @@ startTreasuryLoading model =
 
         Err error ->
             ( { model | error = Just error }, Cmd.none )
+
+
+refreshTreasuryUtxos : Model -> ( Model, Cmd Msg )
+refreshTreasuryUtxos model =
+    -- Remove all known UTxOs from the local state
+    -- Reset treasury management into the loading state without treasury utxos
+    -- Emit the task/command to load all treasury utxos
+    case model.treasuryManagement of
+        TreasuryFullyLoaded loadedTreasury ->
+            let
+                allTreasuriesScriptHashes =
+                    (scopesToList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
+                        |> List.map (\scope -> Tuple.first scope.sundaeTreasuryScript)
+
+                allTreasuriesUtxosTask : ConcurrentTask String TaskCompleted
+                allTreasuriesUtxosTask =
+                    Api.retrieveUtxosWithPaymentCreds { db = model.db } model.networkId allTreasuriesScriptHashes
+                        --> BytesMap CredentialHash (Utxo.RefDict Output)
+                        |> ConcurrentTask.map bytesMapToList
+                        |> ConcurrentTask.andThen listToScopes
+                        |> ConcurrentTask.map LoadedTreasuriesUtxos
+
+                -- BytesMap to List with the same order as allTreasuriesScriptHashes
+                bytesMapToList bytesMap =
+                    List.map (\hash -> Bytes.Map.get hash bytesMap |> Maybe.withDefault Utxo.emptyRefDict)
+                        allTreasuriesScriptHashes
+
+                listToScopes utxosInList =
+                    case utxosInList of
+                        [ ledgerUtxos, consensusUtxos, mercenariesUtxos, marketingUtxos, contingencyUtxos ] ->
+                            ConcurrentTask.succeed ( Scopes ledgerUtxos consensusUtxos mercenariesUtxos marketingUtxos, contingencyUtxos )
+
+                        _ ->
+                            let
+                                _ =
+                                    Debug.log "utxosInList" utxosInList
+                            in
+                            ConcurrentTask.fail "Something unexpected happened while trying to retrieve treasuries UTxOs"
+
+                ( updatedTaskPool, loadTreasuryUtxosCmd ) =
+                    allTreasuriesUtxosTask
+                        |> ConcurrentTask.attempt
+                            { pool = model.taskPool
+                            , send = sendTask
+                            , onComplete = OnTaskComplete
+                            }
+
+                allTreasuryUtxos =
+                    (scopesToList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
+                        |> List.concatMap (\scope -> Dict.Any.keys scope.treasuryUtxos)
+
+                cleanedLocalState =
+                    List.foldl Dict.Any.remove model.localStateUtxos allTreasuryUtxos
+
+                loadingTreasury =
+                    { pragmaScriptHash = loadedTreasury.scopesScriptHash
+                    , registriesSeedUtxo = loadedTreasury.registriesSeedUtxoRef
+                    , rootUtxo = RemoteData.Success loadedTreasury.rootUtxo
+                    , expiration = loadedTreasury.expiration
+                    , scopes = scopesMap reloadScopeTreasury loadedTreasury.scopes
+                    , contingency = reloadScopeTreasury loadedTreasury.contingency
+                    }
+
+                reloadScopeTreasury scope =
+                    reload (N.fromSafeInt <| Time.posixToMillis loadedTreasury.expiration) scope
+                        |> (\loadingScope -> { loadingScope | treasuryUtxos = RemoteData.Loading })
+            in
+            ( { model
+                | treasuryManagement = TreasuryLoading loadingTreasury
+                , localStateUtxos = cleanedLocalState
+                , taskPool = updatedTaskPool
+              }
+            , loadTreasuryUtxosCmd
+            )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+reload : Natural -> Scope -> LoadingScope
+reload expiration scope =
+    { owner = Just scope.owner
+    , permissionsScriptApplied = scope.permissionsScript
+    , permissionsScriptPublished = RemoteData.Success scope.permissionsScriptRef
+    , sundaeTreasuryScriptApplied = RemoteData.Success scope.sundaeTreasuryScript
+    , sundaeTreasuryScriptPublished = RemoteData.Success scope.sundaeTreasuryScriptRef
+    , registryNftPolicyId =
+        -- The registry UTxO is stored at the registry script address (policy ID)
+        (Tuple.second scope.registryUtxo).address
+            |> Address.extractPaymentCred
+            |> Maybe.map Address.extractCredentialHash
+            |> Maybe.withDefault (Bytes.dummy 28 "")
+    , registryUtxo = RemoteData.Success scope.registryUtxo
+    , treasuryUtxos = RemoteData.Success scope.treasuryUtxos
+    , expiration = expiration
+    }
 
 
 
@@ -2350,13 +2445,13 @@ viewTreasurySection params treasuryManagement =
         TreasurySetupTxs state ->
             viewSetupTxsState state
 
-        TreasuryLoading { rootUtxo, pragmaScriptHash, registriesSeedUtxo, treasuryConfigExpiration, scopes, contingency } ->
+        TreasuryLoading { rootUtxo, pragmaScriptHash, registriesSeedUtxo, expiration, scopes, contingency } ->
             div []
                 [ Html.p [] [ text "Loading treasury ... ", spinner ]
                 , viewLoadingRootUtxo rootUtxo
                 , viewPragmaScopesScriptHash pragmaScriptHash
                 , viewRegistriesSeedUtxo registriesSeedUtxo
-                , viewExpirationDate <| N.toInt treasuryConfigExpiration
+                , viewExpirationDate <| Time.posixToMillis expiration
                 , viewLoadingScope "ledger" scopes.ledger
                 , viewLoadingScope "consensus" scopes.consensus
                 , viewLoadingScope "mercenaries" scopes.mercenaries
@@ -2784,9 +2879,12 @@ viewLoadingTreasuryUtxos loadingUtxos =
 viewTreasuryUtxos : String -> Scope -> OutputReference -> Utxo.RefDict Output -> Html Msg
 viewTreasuryUtxos scopeName scope rootUtxo utxos =
     let
+        refreshUtxosButton =
+            Html.button [ onClick RefreshTreasuryUtxos ] [ text "Refresh UTxOs" ]
+
         mergeButton =
             if Dict.Any.size utxos > 1 then
-                Html.button [ onClick (StartMergeUtxos scopeName scope rootUtxo) ] [ text "Merge UTxOs" ]
+                Html.button [ onClick (TreasuryMergingMsg <| StartMergeUtxos scopeName scope rootUtxo) ] [ text "Merge UTxOs" ]
 
             else
                 text ""
@@ -2794,7 +2892,8 @@ viewTreasuryUtxos scopeName scope rootUtxo utxos =
     div []
         [ Html.p [] [ text <| "Treasury UTxOs count: " ++ String.fromInt (Dict.Any.size utxos) ]
         , Html.p [] [ text <| "TODO: add buttons for possible actions with those UTxOs" ]
-        , Html.map TreasuryMergingMsg mergeButton
+        , refreshUtxosButton
+        , mergeButton
         , Html.ul [] <|
             List.map viewDetailedUtxo (Dict.Any.toList utxos)
         ]
