@@ -1806,6 +1806,14 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
         utxos =
             Dict.Any.toList scope.treasuryUtxos
 
+        permissionsWitnessSource =
+            case scope.permissionsScriptRef of
+                Nothing ->
+                    Witness.ByValue <| Script.cborWrappedBytes permissionsScript
+
+                Just ( ref, _ ) ->
+                    Witness.ByReference ref
+
         requiredWithdrawals =
             -- Withdrawal with the scope owner script
             [ { stakeCredential =
@@ -1818,7 +1826,7 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
                         Witness.Plutus
                             { script =
                                 ( Script.plutusVersion permissionsScript
-                                , Witness.ByValue <| Script.cborWrappedBytes permissionsScript
+                                , permissionsWitnessSource
                                 )
                             , redeemerData = \_ -> Data.Constr N.zero []
                             , requiredSigners = requiredSigners
@@ -1832,12 +1840,20 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
         ( treasuryScriptHash, treasuryScript ) =
             scope.sundaeTreasuryScript
 
+        treasuryWitnessSource =
+            case scope.sundaeTreasuryScriptRef of
+                Nothing ->
+                    Witness.ByValue <| Script.cborWrappedBytes treasuryScript
+
+                Just ( ref, _ ) ->
+                    Witness.ByReference ref
+
         -- The address must have a stake cred (delegated to always abstain)
         scopeTreasuryAddress =
             Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
     in
     Treasury.reorganize
-        { treasuryScriptBytes = Script.cborWrappedBytes treasuryScript
+        { scriptWitnessSource = treasuryWitnessSource
         , registryOutputRef = Tuple.first scope.registryUtxo
         , additionalOutputRefs = [ rootUtxo ]
         , requiredSigners = requiredSigners
@@ -1865,9 +1881,20 @@ disburse networkId scope requiredSigners validityRange utxoRef receivers value =
 
         Just spentOutput ->
             let
+                ( _, treasuryScript ) =
+                    scope.sundaeTreasuryScript
+
+                treasuryWitnessSource =
+                    case scope.sundaeTreasuryScriptRef of
+                        Nothing ->
+                            Witness.ByValue <| Script.cborWrappedBytes treasuryScript
+
+                        Just ( ref, _ ) ->
+                            Witness.ByReference ref
+
                 spendConfig : SpendConfig
                 spendConfig =
-                    { treasuryScriptBytes = Script.cborWrappedBytes <| Tuple.second scope.sundaeTreasuryScript
+                    { scriptWitnessSource = treasuryWitnessSource
                     , registryOutputRef = Tuple.first scope.registryUtxo
                     , requiredSigners = requiredSigners
                     , requiredWithdrawals = requiredWithdrawals
@@ -1880,7 +1907,7 @@ disburse networkId scope requiredSigners validityRange utxoRef receivers value =
                     -- Withdrawal with the scope owner script
                     [ { stakeCredential =
                             { networkId = networkId
-                            , stakeCredential = ScriptHash ownerScriptHash
+                            , stakeCredential = ScriptHash permissionsScriptHash
                             }
                       , amount = N.zero
                       , scriptWitness =
@@ -1888,7 +1915,7 @@ disburse networkId scope requiredSigners validityRange utxoRef receivers value =
                                 Witness.Plutus
                                     { script =
                                         ( Script.plutusVersion permissionsScript
-                                        , Witness.ByValue <| Script.cborWrappedBytes permissionsScript
+                                        , permissionsWitnessSource
                                         )
                                     , redeemerData = \_ -> Debug.todo "Standard/Swap Owner Redeemer"
                                     , requiredSigners = requiredSigners
@@ -1896,8 +1923,16 @@ disburse networkId scope requiredSigners validityRange utxoRef receivers value =
                       }
                     ]
 
-                ( ownerScriptHash, permissionsScript ) =
+                ( permissionsScriptHash, permissionsScript ) =
                     scope.permissionsScript
+
+                permissionsWitnessSource =
+                    case scope.permissionsScriptRef of
+                        Nothing ->
+                            Witness.ByValue <| Script.cborWrappedBytes permissionsScript
+
+                        Just ( ref, _ ) ->
+                            Witness.ByReference ref
 
                 overflowValue =
                     Value.subtract value spentOutput.amount

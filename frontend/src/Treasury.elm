@@ -59,7 +59,7 @@ initialWithdrawal networkId treasuryScriptHash treasuryScriptBytes amount =
 
 
 type alias SpendConfig =
-    { treasuryScriptBytes : Bytes ScriptCbor
+    { scriptWitnessSource : Witness.Source (Bytes ScriptCbor)
     , registryOutputRef : OutputReference
     , requiredSigners : List (Bytes CredentialHash)
     , requiredWithdrawals : List WithdrawalIntent
@@ -126,7 +126,7 @@ disburse config receivers value =
 {-| Config for reorganizing the treasury UTxOs.
 -}
 type alias ReorganizeConfig =
-    { treasuryScriptBytes : Bytes ScriptCbor
+    { scriptWitnessSource : Witness.Source (Bytes ScriptCbor)
     , registryOutputRef : OutputReference
     , additionalOutputRefs : List OutputReference
     , requiredSigners : List (Bytes CredentialHash)
@@ -144,7 +144,7 @@ The caller is responsible to list the requiredSigners, and the validity range.
 
 -}
 reorganize : ReorganizeConfig -> ( List TxIntent, List TxOtherInfo )
-reorganize { treasuryScriptBytes, registryOutputRef, additionalOutputRefs, requiredSigners, validityRange, requiredWithdrawals, spentUtxos, receivers } =
+reorganize { scriptWitnessSource, registryOutputRef, additionalOutputRefs, requiredSigners, validityRange, requiredWithdrawals, spentUtxos, receivers } =
     let
         -- (List TxIntent, List TxOtherInfo)
         ( spendIntents, spendOthers ) =
@@ -152,7 +152,7 @@ reorganize { treasuryScriptBytes, registryOutputRef, additionalOutputRefs, requi
             spentUtxos
                 |> List.map
                     (\( spentInputRef, spentOutput ) ->
-                        spend (SpendConfig treasuryScriptBytes registryOutputRef requiredSigners requiredWithdrawals spentInputRef spentOutput validityRange)
+                        spend (SpendConfig scriptWitnessSource registryOutputRef requiredSigners requiredWithdrawals spentInputRef spentOutput validityRange)
                             Types.Reorganize
                             (\_ -> [])
                             spentOutput.amount
@@ -173,11 +173,11 @@ reorganize { treasuryScriptBytes, registryOutputRef, additionalOutputRefs, requi
 and return the unspent amount into it.
 -}
 spend : SpendConfig -> TreasurySpendRedeemer -> (Value -> List TxIntent) -> Value -> ( List TxIntent, List TxOtherInfo )
-spend { treasuryScriptBytes, registryOutputRef, requiredSigners, requiredWithdrawals, spentInputRef, spentOutput, validityRange } redeemer receivers value =
+spend { scriptWitnessSource, registryOutputRef, requiredSigners, requiredWithdrawals, spentInputRef, spentOutput, validityRange } redeemer receivers value =
     let
         plutusScriptWitness : Witness.PlutusScript
         plutusScriptWitness =
-            { script = ( PlutusV3, Witness.ByValue treasuryScriptBytes )
+            { script = ( PlutusV3, scriptWitnessSource )
             , redeemerData = \_ -> treasurySpendRedeemerToData redeemer
             , requiredSigners = requiredSigners
             }
