@@ -75,6 +75,7 @@ type Subject
     = Unknown
     | TreasurySetup
     | MergeUtxos
+    | Disburse
     | PublishScript (Bytes CredentialHash)
 
 
@@ -422,6 +423,9 @@ view ctx model =
 
                             MergeUtxos ->
                                 "Merge UTxOs"
+
+                            Disburse ->
+                                "Disburse"
 
                             PublishScript _ ->
                                 "Treasury management"
