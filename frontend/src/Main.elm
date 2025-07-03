@@ -2613,7 +2613,7 @@ viewHome model =
         , viewLocalStateUtxosSection model.localStateUtxos
         , case model.treasuryAction of
             NoTreasuryAction ->
-                viewTreasurySection model.treasuryLoadingParams model.treasuryManagement
+                viewTreasurySection model.networkId model.treasuryLoadingParams model.treasuryManagement
 
             MergeTreasuryUtxos mergeState ->
                 viewMergeUtxosAction model.connectedWallet mergeState
@@ -2692,8 +2692,8 @@ viewLocalStateUtxosSection utxos =
 -- Treasury Section
 
 
-viewTreasurySection : TreasuryLoadingParams -> TreasuryManagement -> Html Msg
-viewTreasurySection params treasuryManagement =
+viewTreasurySection : NetworkId -> TreasuryLoadingParams -> TreasuryManagement -> Html Msg
+viewTreasurySection networkId params treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
             div []
@@ -2777,11 +2777,11 @@ viewTreasurySection params treasuryManagement =
                 [ Html.p [] [ text "Treasury fully loaded" ]
                 , viewReload scopesScriptHash registriesSeedUtxoRef expiration
                 , viewRootUtxo rootUtxo
-                , viewScope rootUtxoRef allOwners "ledger" scopes.ledger
-                , viewScope rootUtxoRef allOwners "consensus" scopes.consensus
-                , viewScope rootUtxoRef allOwners "mercenaries" scopes.mercenaries
-                , viewScope rootUtxoRef allOwners "marketing" scopes.marketing
-                , viewScope rootUtxoRef allOwners "contingency" contingency
+                , viewScope networkId rootUtxoRef allOwners "ledger" scopes.ledger
+                , viewScope networkId rootUtxoRef allOwners "consensus" scopes.consensus
+                , viewScope networkId rootUtxoRef allOwners "mercenaries" scopes.mercenaries
+                , viewScope networkId rootUtxoRef allOwners "marketing" scopes.marketing
+                , viewScope networkId rootUtxoRef allOwners "contingency" contingency
                 ]
 
 
@@ -3020,10 +3020,18 @@ viewScopeSetup scopeName { owner, permissionsScript, sundaeTreasuryScript, regis
         ]
 
 
-viewScope : OutputReference -> List ( String, MultisigScript ) -> String -> Scope -> Html Msg
-viewScope rootUtxo allOwners scopeName ({ owner, permissionsScript, permissionsScriptRef, sundaeTreasuryScript, sundaeTreasuryScriptRef, registryUtxo, treasuryUtxos } as scope) =
+viewScope : NetworkId -> OutputReference -> List ( String, MultisigScript ) -> String -> Scope -> Html Msg
+viewScope networkId rootUtxo allOwners scopeName ({ owner, permissionsScript, permissionsScriptRef, sundaeTreasuryScript, sundaeTreasuryScriptRef, registryUtxo, treasuryUtxos } as scope) =
+    let
+        treasuryScriptHash =
+            Tuple.first sundaeTreasuryScript
+
+        treasuryAddress =
+            Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
+    in
     div [ HA.style "border" "1px solid black" ]
         [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
+        , text <| "Scope address: " ++ Address.toBech32 treasuryAddress
         , viewOwner owner
         , viewPermissionsScript permissionsScript
         , viewPermissionsScriptRef (Tuple.first permissionsScript) (Tuple.second permissionsScript) permissionsScriptRef
