@@ -2724,6 +2724,7 @@ viewTreasurySection networkId params treasuryManagement =
                     [ Html.label [] [ text "Registries Seed UTxO - Output Index: " ]
                     , Html.input
                         [ HA.type_ "number"
+                        , HA.min "0"
                         , HA.value <| String.fromInt params.registriesSeedUtxo.outputIndex
                         , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedOutputIndex)
                         ]
