@@ -2713,6 +2713,7 @@ viewTreasurySection networkId params treasuryManagement =
                     [ Html.label [] [ text "Pragma Scopes script hash: " ]
                     , Html.input
                         [ HA.type_ "text"
+                        , HA.placeholder "44dd0678ba5f89b41869362ea3d3e509f94e48bd57be57faedaad0c6"
                         , HA.value params.pragmaScriptHash
                         , HE.onInput (TreasuryLoadingParamsMsg << UpdatePragmaScriptHash)
                         ]
@@ -2722,15 +2723,15 @@ viewTreasurySection networkId params treasuryManagement =
                     [ Html.label [] [ text "Registries Seed UTxO - Tx ID: " ]
                     , Html.input
                         [ HA.type_ "text"
+                        , HA.placeholder "9737488cbd45bc71d5c12490865b20ec8aa9f74b3110f4c2aa588b5e1e09dad6"
                         , HA.value params.registriesSeedUtxo.transactionId
                         , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedTransactionId)
                         ]
                         []
-                    ]
-                , Html.p []
-                    [ Html.label [] [ text "Registries Seed UTxO - Output Index: " ]
+                    , Html.label [] [ text " - Output Index: # " ]
                     , Html.input
                         [ HA.type_ "number"
+                        , HA.size 2
                         , HA.min "0"
                         , HA.value <| String.fromInt params.registriesSeedUtxo.outputIndex
                         , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedOutputIndex)
@@ -2832,8 +2833,18 @@ displayPosixDate posix =
         day =
             Time.toDay Time.utc posix
                 |> String.fromInt
+
+        hour =
+            Time.toHour Time.utc posix
+                |> String.fromInt
+                |> String.padLeft 2 '0'
+
+        minutes =
+            Time.toMinute Time.utc posix
+                |> String.fromInt
+                |> String.padLeft 2 '0'
     in
-    "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day
+    "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day ++ " - " ++ hour ++ ":" ++ minutes
 
 
 viewTreasurySetupForm : SetupForm -> Html Msg
