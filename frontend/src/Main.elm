@@ -1666,9 +1666,11 @@ createPublishScriptTx hash script model =
                     Address.extractPubKeyHash walletAddress
                         |> Maybe.withDefault (Bytes.dummy 28 "")
 
-                -- TODO: for now this is published in a multisig with just the wallet key
+                -- For now this is published in a multisig with just the wallet key as payment credential,
+                -- and re-using the same stake credential to keep it staked.
                 utxoAddress =
-                    Address.script model.networkId <| Script.hash <| Script.Native <| ScriptPubkey walletKey
+                    Address.script model.networkId (Script.hash <| Script.Native <| ScriptPubkey walletKey)
+                        |> Address.setShelleyStakeCred (Address.extractStakeCredential walletAddress)
 
                 scriptUtxo =
                     Utxo.withMinAda <|
