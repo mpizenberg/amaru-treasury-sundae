@@ -27,6 +27,7 @@ import Html.Events as HE exposing (onClick)
 import Http
 import Integer as I
 import Json.Decode as JD
+import Json.Encode as JE
 import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
@@ -34,6 +35,7 @@ import Page.SignTx as SignTx exposing (Subject(..))
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
+import Storage
 import Task
 import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
@@ -119,7 +121,9 @@ type Msg
 
 
 type TaskCompleted
-    = LoadedPragmaUtxo ( OutputReference, Output )
+    = ReadLoadingParams (Maybe TreasuryLoadingParamsForm)
+    | LoadingParamsSaved
+    | LoadedPragmaUtxo ( OutputReference, Output )
     | LoadedRegistryUtxos ( Scopes ( OutputReference, Output ), ( OutputReference, Output ) )
     | LoadedTreasuriesUtxos ( Scopes (Utxo.RefDict Output), Utxo.RefDict Output )
     | LoadedTreasuryRefScript (Bytes CredentialHash) (Maybe ( OutputReference, Output ))
@@ -153,6 +157,20 @@ type alias TreasuryLoadingParamsForm =
     , treasuryConfigExpiration : Int
     , error : Maybe String
     }
+
+
+treasuryLoadingParamsFormDecoder : JD.Decoder TreasuryLoadingParamsForm
+treasuryLoadingParamsFormDecoder =
+    JD.map4 TreasuryLoadingParamsForm
+        (JD.field "pragmaScriptHash" JD.string)
+        (JD.field "registriesSeedUtxo"
+            (JD.map2 (\a b -> { transactionId = a, outputIndex = b })
+                (JD.field "transactionId" JD.string)
+                (JD.field "outputIndex" JD.int)
+            )
+        )
+        (JD.field "treasuryConfigExpiration" JD.int)
+        (JD.succeed Nothing)
 
 
 initialModel : JD.Value -> Scripts -> Int -> Model
@@ -269,6 +287,20 @@ type alias LoadingParams =
     , registriesSeedUtxo : OutputReference
     , expiration : Posix
     }
+
+
+encodeLoadingParams : LoadingParams -> JE.Value
+encodeLoadingParams { pragmaScriptHash, registriesSeedUtxo, expiration } =
+    JE.object
+        [ ( "pragmaScriptHash", JE.string <| Bytes.toHex pragmaScriptHash )
+        , ( "registriesSeedUtxo"
+          , JE.object
+                [ ( "transactionId", JE.string <| Bytes.toHex registriesSeedUtxo.transactionId )
+                , ( "outputIndex", JE.int registriesSeedUtxo.outputIndex )
+                ]
+          )
+        , ( "treasuryConfigExpiration", JE.int <| Time.posixToMillis expiration )
+        ]
 
 
 type alias LoadingScope =
@@ -930,13 +962,25 @@ init { db, blueprints, posixTimeMs } =
 
         model =
             initialModel db scripts posixTimeMs
+
+        ( updatedTaskPool, readTreasuryParamsCmd ) =
+            Storage.read { db = db, storeName = "stuff" } treasuryLoadingParamsFormDecoder { key = "treasuryLoadingParams" }
+                |> ConcurrentTask.map Just
+                |> ConcurrentTask.onError (\_ -> ConcurrentTask.succeed Nothing)
+                |> ConcurrentTask.map ReadLoadingParams
+                |> ConcurrentTask.attempt
+                    { pool = model.taskPool
+                    , send = sendTask
+                    , onComplete = OnTaskComplete
+                    }
     in
     case blueprintError of
         Nothing ->
-            ( model
+            ( { model | taskPool = updatedTaskPool }
             , Cmd.batch
                 [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
                 , Api.loadProtocolParams model.networkId GotNetworkParams
+                , readTreasuryParamsCmd
                 ]
             )
 
@@ -1527,8 +1571,17 @@ startTreasuryLoading model =
                         |> ConcurrentTask.andThen (Api.retrieveOutput model.networkId)
                         |> ConcurrentTask.map LoadedPragmaUtxo
 
+                -- Write to local storage the treasury loading params
+                saveTreasuryLoadingParamsTask =
+                    Storage.write { db = model.db, storeName = "stuff" }
+                        encodeLoadingParams
+                        { key = "treasuryLoadingParams" }
+                        loadingTreasury.loadingParams
+                        |> ConcurrentTask.map (\_ -> LoadingParamsSaved)
+
                 ( updatedPool, taskCmds ) =
-                    (loadPragmaUtxoTask
+                    (saveTreasuryLoadingParamsTask
+                        :: loadPragmaUtxoTask
                         :: loadRegistryUtxosTask loadingTreasury.scopes loadingTreasury.contingency
                         :: loadPermissionsRefScriptsUtxosTask
                     )
@@ -1766,9 +1819,6 @@ handleBuildMergeTransaction model requiredSigners currentTime =
     case ( model.treasuryAction, model.connectedWallet ) of
         ( MergeTreasuryUtxos mergeState, Just wallet ) ->
             let
-                _ =
-                    Debug.log "currentTime" currentTime
-
                 slotConfig =
                     case model.networkId of
                         Mainnet ->
@@ -1789,7 +1839,6 @@ handleBuildMergeTransaction model requiredSigners currentTime =
 
                 validityRange =
                     Just { start = N.toInt slot60sAgo, end = slotIn6Hours }
-                        |> Debug.log "validityRange"
 
                 ( mergeTxIntents, mergeOtherInfo ) =
                     mergeUtxos model.networkId mergeState.rootUtxo mergeState.scope requiredSigners validityRange
@@ -2063,7 +2112,6 @@ handleBuildDisburseTransaction localStateUtxos networkId wallet currentTime disb
     let
         spentUtxo =
             form.selectedUtxo
-                |> Debug.log "spentUtxo"
 
         -- Extract signers from the scope owners.
         -- TODO: actually we should let finer grained control from users in the form.
@@ -2114,7 +2162,6 @@ handleBuildDisburseTransaction localStateUtxos networkId wallet currentTime disb
 
         validityRange =
             Just { start = N.toInt slot60sAgo, end = slotIn6Hours }
-                |> Debug.log "validityRange"
 
         -- ( disburseTxIntents, disburseOtherInfo )
         disburseIntentsResult =
@@ -2242,6 +2289,15 @@ handleTask response model =
 handleCompletedTask : Model -> TaskCompleted -> ( Model, Cmd Msg )
 handleCompletedTask model taskCompleted =
     case taskCompleted of
+        ReadLoadingParams (Just paramsForm) ->
+            ( { model | treasuryLoadingParamsForm = paramsForm }, Cmd.none )
+
+        ReadLoadingParams Nothing ->
+            ( model, Cmd.none )
+
+        LoadingParamsSaved ->
+            ( model, Cmd.none )
+
         LoadedPragmaUtxo ( ref, output ) ->
             case model.treasuryManagement of
                 TreasuryLoading loadingTreasury ->

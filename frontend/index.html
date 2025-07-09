@@ -17,8 +17,8 @@
 
             // Initialize the Elm app
             const db = await Storage.init({
-                version: 1,
-                storeNames: ["tx"],
+                version: 2,
+                storeNames: ["tx", "stuff"],
             });
             const sundaeBlueprint = await (
                 await fetch("./sundae-plutus.json")
