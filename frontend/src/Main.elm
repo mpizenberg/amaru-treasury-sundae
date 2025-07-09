@@ -2395,11 +2395,67 @@ updateTreasuryLoading model f =
                 -- If everything has loaded,
                 -- then we can convert into a LoadedTreasury
                 |> upgradeIfTreasuryLoadingFinished
+                |> doubleCheckTreasuryScriptsHashes
             , Cmd.none
             )
 
         _ ->
             ( model, Cmd.none )
+
+
+doubleCheckTreasuryScriptsHashes : Model -> Model
+doubleCheckTreasuryScriptsHashes ({ treasuryLoadingParamsForm } as model) =
+    -- Make sure the scripts hashes obtained from applying the scripts
+    -- match the ones obtained from the registry datums
+    case model.treasuryManagement of
+        TreasuryFullyLoaded loadedTreasury ->
+            (scopesToList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
+                |> Result.Extra.combineMap doublecheckTreasuryScriptHash
+                |> Result.Extra.unpack
+                    (\error ->
+                        { model
+                            | treasuryManagement = TreasuryUnspecified
+                            , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
+                        }
+                    )
+                    (\_ -> model)
+
+        _ ->
+            model
+
+
+doublecheckTreasuryScriptHash : Scope -> Result String ()
+doublecheckTreasuryScriptHash { sundaeTreasuryScript, registryUtxo } =
+    let
+        ( computedScriptHash, _ ) =
+            sundaeTreasuryScript
+
+        ( registryRef, registryOutput ) =
+            registryUtxo
+
+        -- Decode the output datum into Types.ScriptHashRegistry
+        treasuryHashDecodedFromRegistry =
+            case registryOutput.datumOption of
+                Nothing ->
+                    Err <| "No datum found in the supposed registry UTxO: " ++ Utxo.refAsString registryRef
+
+                Just (DatumHash _) ->
+                    Err <| "The registry UTxO datum is a datum hash instead of a datum value"
+
+                Just (DatumValue { rawBytes }) ->
+                    Data.fromBytes rawBytes
+                        |> Maybe.andThen Types.registryFromData
+                        |> Result.fromMaybe ("The registry UTxO datum does not contain a valid registry. UTxO ref: " ++ Utxo.refAsString registryRef)
+    in
+    treasuryHashDecodedFromRegistry
+        |> Result.andThen
+            (\{ treasury } ->
+                if treasury == ScriptHash computedScriptHash then
+                    Ok ()
+
+                else
+                    Err <| "Treasury script hash mismatch between the one in the onchain registry UTxO, and the one re-computed from the treasury script blueprint. Make sure you are compiling the aiken contracts with the correct debug options."
+            )
 
 
 setRegistryUtxos : Scopes ( OutputReference, Output ) -> Scopes LoadingScope -> Scopes LoadingScope

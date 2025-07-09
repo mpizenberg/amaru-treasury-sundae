@@ -33,6 +33,21 @@ registryToData { treasury, vendor } =
         ]
 
 
+registryFromData : Data -> Maybe ScriptHashRegistry
+registryFromData data =
+    case data of
+        Data.Constr index [ treasuryData, vendorData ] ->
+            case ( N.toInt index, Address.credentialFromData treasuryData, Address.credentialFromData vendorData ) of
+                ( 0, Just treasury, Just vendor ) ->
+                    Just { treasury = treasury, vendor = vendor }
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
 
 -- Treasury
 
