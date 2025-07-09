@@ -2697,13 +2697,11 @@ viewTreasurySection networkId params treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
             div []
-                [ Html.p [] [ Html.text "Treasury unspecified yet" ]
+                [ Html.h2 [] [ Html.text "Setup a new treasury" ]
                 , Html.button [ onClick StartTreasurySetup ]
                     [ text "Setup a new treasury" ]
-                , text " or "
-                , Html.button [ onClick StartTreasuryLoading ]
-                    [ text "Load pre-initialized treasury" ]
-                , Html.p [] [ text "Override treasury loading parameters:" ]
+                , Html.h2 [] [ Html.text "Load an existing treasury" ]
+                , Html.p [] [ text "With the following parameters:" ]
                 , Html.p []
                     [ Html.label [] [ text "Pragma Scopes script hash: " ]
                     , Html.input
@@ -2741,6 +2739,8 @@ viewTreasurySection networkId params treasuryManagement =
                         []
                     , text <| " (" ++ displayPosixDate (Time.millisToPosix params.treasuryConfigExpiration) ++ ")"
                     ]
+                , Html.button [ onClick StartTreasuryLoading ]
+                    [ text "Load treasury" ]
                 ]
 
         TreasurySetupForm form ->
