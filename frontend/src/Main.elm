@@ -271,56 +271,6 @@ type alias LoadingParams =
     }
 
 
-validateLoadingParams : TreasuryLoadingParamsForm -> Result String LoadingParams
-validateLoadingParams formParams =
-    case ( Bytes.fromHex formParams.pragmaScriptHash, Bytes.fromHex formParams.registriesSeedUtxo.transactionId ) of
-        ( Nothing, _ ) ->
-            Err <| "Pragma script hash is not a valid hex string: " ++ formParams.pragmaScriptHash
-
-        ( _, Nothing ) ->
-            Err <| "Registries seed utxo transaction id is not a valid hex string: " ++ formParams.registriesSeedUtxo.transactionId
-
-        ( Just scriptHash, Just transactionId ) ->
-            if Bytes.width scriptHash /= 28 then
-                Err <| "Pragma script hash is " ++ String.fromInt (Bytes.width scriptHash) ++ " bytes long, but expected 28"
-
-            else if Bytes.width transactionId /= 32 then
-                Err <| "Registries seed utxo transaction id is " ++ String.fromInt (Bytes.width transactionId) ++ " bytes long, but expected 32"
-
-            else
-                Ok
-                    { pragmaScriptHash = scriptHash
-                    , registriesSeedUtxo = OutputReference transactionId formParams.registriesSeedUtxo.outputIndex
-                    , expiration = Time.millisToPosix formParams.treasuryConfigExpiration
-                    }
-
-
-initLoadingTreasury : Scripts -> TreasuryLoadingParamsForm -> Result String LoadingTreasury
-initLoadingTreasury unappliedScripts formParams =
-    validateLoadingParams formParams
-        |> Result.andThen
-            (\params ->
-                let
-                    initLoadingScopeWithIndex index =
-                        initLoadingScope params unappliedScripts index
-
-                    loadingTreasury ledger consensus mercenaries marketing contingency =
-                        { loadingParams = params
-                        , rootUtxo = RemoteData.Loading
-                        , scopes = Scopes ledger consensus mercenaries marketing
-                        , contingency = contingency
-                        }
-                in
-                Result.map5 loadingTreasury
-                    (initLoadingScopeWithIndex 0)
-                    (initLoadingScopeWithIndex 1)
-                    (initLoadingScopeWithIndex 2)
-                    (initLoadingScopeWithIndex 3)
-                    -- contingency
-                    (initLoadingScopeWithIndex 4)
-            )
-
-
 type alias LoadingScope =
     { owner : Maybe MultisigScript
     , permissionsScriptApplied : ( Bytes CredentialHash, PlutusScript )
@@ -1433,6 +1383,56 @@ handleTreasuryLoadingParamsMsg msg ({ treasuryLoadingParamsForm } as model) =
 
 
 -- Loading the Treasury
+
+
+validateLoadingParams : TreasuryLoadingParamsForm -> Result String LoadingParams
+validateLoadingParams formParams =
+    case ( Bytes.fromHex formParams.pragmaScriptHash, Bytes.fromHex formParams.registriesSeedUtxo.transactionId ) of
+        ( Nothing, _ ) ->
+            Err <| "Pragma script hash is not a valid hex string: " ++ formParams.pragmaScriptHash
+
+        ( _, Nothing ) ->
+            Err <| "Registries seed utxo transaction id is not a valid hex string: " ++ formParams.registriesSeedUtxo.transactionId
+
+        ( Just scriptHash, Just transactionId ) ->
+            if Bytes.width scriptHash /= 28 then
+                Err <| "Pragma script hash is " ++ String.fromInt (Bytes.width scriptHash) ++ " bytes long, but expected 28"
+
+            else if Bytes.width transactionId /= 32 then
+                Err <| "Registries seed utxo transaction id is " ++ String.fromInt (Bytes.width transactionId) ++ " bytes long, but expected 32"
+
+            else
+                Ok
+                    { pragmaScriptHash = scriptHash
+                    , registriesSeedUtxo = OutputReference transactionId formParams.registriesSeedUtxo.outputIndex
+                    , expiration = Time.millisToPosix formParams.treasuryConfigExpiration
+                    }
+
+
+initLoadingTreasury : Scripts -> TreasuryLoadingParamsForm -> Result String LoadingTreasury
+initLoadingTreasury unappliedScripts formParams =
+    validateLoadingParams formParams
+        |> Result.andThen
+            (\params ->
+                let
+                    initLoadingScopeWithIndex index =
+                        initLoadingScope params unappliedScripts index
+
+                    loadingTreasury ledger consensus mercenaries marketing contingency =
+                        { loadingParams = params
+                        , rootUtxo = RemoteData.Loading
+                        , scopes = Scopes ledger consensus mercenaries marketing
+                        , contingency = contingency
+                        }
+                in
+                Result.map5 loadingTreasury
+                    (initLoadingScopeWithIndex 0)
+                    (initLoadingScopeWithIndex 1)
+                    (initLoadingScopeWithIndex 2)
+                    (initLoadingScopeWithIndex 3)
+                    -- contingency
+                    (initLoadingScopeWithIndex 4)
+            )
 
 
 startTreasuryLoading : Model -> ( Model, Cmd Msg )
