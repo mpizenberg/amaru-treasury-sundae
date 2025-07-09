@@ -44,14 +44,7 @@ type alias Flags =
     { url : String
     , db : JD.Value
     , blueprints : List JD.Value
-    , treasuryLoadingParams : TreasuryLoadingParams
-    }
-
-
-type alias TreasuryLoadingParams =
-    { pragmaScriptHash : String
-    , registriesSeedUtxo : { transactionId : String, outputIndex : Int }
-    , treasuryConfigExpiration : Int
+    , posixTimeMs : Int
     }
 
 
@@ -154,8 +147,22 @@ type alias Model =
     }
 
 
-initialModel : JD.Value -> Scripts -> TreasuryLoadingParams -> Model
-initialModel db scripts treasuryLoadingParams =
+type alias TreasuryLoadingParams =
+    { pragmaScriptHash : String
+    , registriesSeedUtxo : { transactionId : String, outputIndex : Int }
+    , treasuryConfigExpiration : Int
+    }
+
+
+initialModel : JD.Value -> Scripts -> Int -> Model
+initialModel db scripts posixTimeMs =
+    let
+        treasuryLoadingParams =
+            { pragmaScriptHash = ""
+            , registriesSeedUtxo = { transactionId = "", outputIndex = 0 }
+            , treasuryConfigExpiration = posixTimeMs
+            }
+    in
     { taskPool = ConcurrentTask.pool
     , db = db
     , page = Home
@@ -918,7 +925,7 @@ type alias DisburseForm =
 
 
 init : Flags -> ( Model, Cmd Msg )
-init { db, blueprints, treasuryLoadingParams } =
+init { db, blueprints, posixTimeMs } =
     let
         decodedBlueprints : List ScriptBlueprint
         decodedBlueprints =
@@ -960,7 +967,7 @@ init { db, blueprints, treasuryLoadingParams } =
                     )
 
         model =
-            initialModel db scripts treasuryLoadingParams
+            initialModel db scripts posixTimeMs
     in
     case blueprintError of
         Nothing ->

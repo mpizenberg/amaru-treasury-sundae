@@ -20,21 +20,11 @@
                 version: 1,
                 storeNames: ["tx"],
             });
-            const pragmaBlueprint = await (
-                await fetch("./amaru-build/scopes.plutus.json")
-            ).json();
-            const pragmaScriptHash = pragmaBlueprint.validators[0].hash;
             const sundaeBlueprint = await (
                 await fetch("./sundae-plutus.json")
             ).json();
             const amaruBlueprint = await (
                 await fetch("./amaru-plutus.json")
-            ).json();
-            const registriesSeedUtxo = await (
-                await fetch("./amaru-build/registry-seed.json")
-            ).json();
-            const treasuryConfig = await (
-                await fetch("./amaru-build/treasury-configuration.json")
             ).json();
             var app = Elm.Main.init({
                 node: document.getElementById("myapp"),
@@ -42,11 +32,7 @@
                     url: window.location.href,
                     db,
                     blueprints: [sundaeBlueprint, amaruBlueprint],
-                    treasuryLoadingParams: {
-                        pragmaScriptHash,
-                        registriesSeedUtxo,
-                        treasuryConfigExpiration: treasuryConfig.expiration,
-                    },
+                    posixTimeMs: Date.now(),
                 },
             });
             // Initialize default ports for the app
