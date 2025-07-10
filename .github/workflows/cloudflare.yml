@@ -1,0 +1,57 @@
+name: Cloudflare
+on: [push]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    name: Publish to Cloudflare Pages
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Extract compiler version from aiken.toml
+        id: get-aiken-version
+        run: |
+          version=$(python3 .github/get_aiken_version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: aiken-lang/setup-aiken@v1
+        with:
+          version: ${{ steps.get-aiken-version.outputs.version }}
+
+      - name: Build the aiken scripts
+        run: |
+          cd amaru-treasury
+          aiken build
+          cd treasury-contracts
+          aiken build
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Build the frontend app
+        run: |
+          cd frontend
+          npm ci
+          npm run make:debug
+
+      - name: Prepare the dist/ folder for Cloudflare
+        run: |
+          cd frontend
+          npm run make:dist
+
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy frontend/dist --project-name=amaru-treasury
+          # Optional: Enable this if you want to have GitHub Deployments triggered
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
