@@ -5,6 +5,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "make": "elm-cardano make src/Main.elm --output main.js",
+    "make:debug": "elm-cardano make --debug src/Main.elm --output main.js",
     "watch": "elm-watch hot",
     "format": "elm-format src/",
     "format:validate": "elm-format --validate src/",
