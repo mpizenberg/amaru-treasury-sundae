@@ -66,10 +66,10 @@
 
             // Change the URL upon request
             // Do (// not) inform app of the change
-            // app.ports.pushUrl.subscribe(function (url) {
-            //     history.pushState({}, "", url);
-            //     // app.ports.onUrlChange.send(location.href);
-            // });
+            app.ports.pushUrl.subscribe(function (url) {
+                history.pushState({}, "", url);
+                // app.ports.onUrlChange.send(location.href);
+            });
         </script>
     </body>
 </html>

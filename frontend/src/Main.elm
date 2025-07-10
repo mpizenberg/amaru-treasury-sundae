@@ -1,6 +1,7 @@
 port module Main exposing (main)
 
 import Api exposing (ProtocolParams)
+import AppUrl exposing (AppUrl)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
@@ -35,6 +36,7 @@ import Page.SignTx as SignTx exposing (Subject(..))
 import Platform.Cmd as Cmd
 import RemoteData exposing (RemoteData)
 import Result.Extra
+import Route exposing (Route)
 import Storage
 import Task
 import Time exposing (Posix)
@@ -62,9 +64,7 @@ main =
             \model ->
                 Sub.batch
                     [ fromWallet WalletMsg
-
-                    -- , onUrlChange (locationHrefToRoute >> UrlChanged)
-                    , onUrlChange UrlChanged
+                    , onUrlChange (UrlChanged << Route.fromLocationHref)
                     , ConcurrentTask.onProgress
                         { send = sendTask
                         , receive = receiveTask
@@ -96,8 +96,7 @@ port receiveTask : (JD.Value -> msg) -> Sub msg
 
 type Msg
     = NoMsg
-    | GoToHomePage
-    | UrlChanged String
+    | UrlChanged Route
     | WalletMsg JD.Value
     | DisconnectWallet
     | ConnectButtonClicked { id : String }
@@ -138,6 +137,7 @@ type alias Model =
     { taskPool : ConcurrentTask.Pool Msg String TaskCompleted
     , db : JD.Value
     , page : Page
+    , appUrl : AppUrl
     , networkId : NetworkId
     , protocolParams : ProtocolParams
     , discoveredWallets : List Cip30.WalletDescriptor
@@ -186,6 +186,7 @@ initialModel db scripts posixTimeMs =
     { taskPool = ConcurrentTask.pool
     , db = db
     , page = Home
+    , appUrl = Route.toAppUrl Route.Home
     , networkId = Testnet
     , protocolParams = Api.defaultProtocolParams
     , discoveredWallets = []
@@ -919,7 +920,7 @@ type alias DisburseForm =
 
 
 init : Flags -> ( Model, Cmd Msg )
-init { db, blueprints, posixTimeMs } =
+init { url, db, blueprints, posixTimeMs } =
     let
         decodedBlueprints : List ScriptBlueprint
         decodedBlueprints =
@@ -960,8 +961,9 @@ init { db, blueprints, posixTimeMs } =
                     , Just "Failed the retrieve some of the Plutus blueprints. Did you forget to build the aiken code?"
                     )
 
-        model =
-            initialModel db scripts posixTimeMs
+        ( model, routingCmd ) =
+            handleUrlChange (Route.fromLocationHref url)
+                (initialModel db scripts posixTimeMs)
 
         ( updatedTaskPool, readTreasuryParamsCmd ) =
             Storage.read { db = db, storeName = "stuff" } treasuryLoadingParamsFormDecoder { key = "treasuryLoadingParams" }
@@ -978,7 +980,8 @@ init { db, blueprints, posixTimeMs } =
         Nothing ->
             ( { model | taskPool = updatedTaskPool }
             , Cmd.batch
-                [ toWallet <| Cip30.encodeRequest Cip30.discoverWallets
+                [ routingCmd
+                , toWallet <| Cip30.encodeRequest Cip30.discoverWallets
                 , Api.loadProtocolParams model.networkId GotNetworkParams
                 , readTreasuryParamsCmd
                 ]
@@ -1019,11 +1022,20 @@ update msg model =
         NoMsg ->
             ( model, Cmd.none )
 
-        GoToHomePage ->
-            ( { model | page = Home }, Cmd.none )
+        UrlChanged route ->
+            let
+                oldUrl =
+                    model.appUrl
 
-        UrlChanged _ ->
-            ( Debug.todo "", Debug.todo "" )
+                newUrl =
+                    Route.toAppUrl route
+            in
+            -- If the new URL is exactly the same, ignore
+            if newUrl == oldUrl then
+                ( model, Cmd.none )
+
+            else
+                handleUrlChange route model
 
         WalletMsg value ->
             handleWalletMsg value model
@@ -1093,6 +1105,62 @@ update msg model =
 
         OnTaskComplete taskCompleted ->
             handleTask taskCompleted model
+
+
+
+-- URL changes
+
+
+handleUrlChange : Route -> Model -> ( Model, Cmd Msg )
+handleUrlChange route model =
+    let
+        appUrl =
+            Route.toAppUrl route
+
+        pushUrlCmd =
+            if appUrl == model.appUrl then
+                Cmd.none
+
+            else
+                pushUrl <| AppUrl.toString appUrl
+    in
+    case route of
+        Route.NotFound ->
+            Debug.todo "Handle 404 page"
+
+        Route.Home ->
+            ( { model
+                | error = Nothing
+                , page = Home
+                , appUrl = appUrl
+              }
+            , pushUrlCmd
+            )
+
+        Route.Signing args ->
+            let
+                subject =
+                    SignTx.Unknown
+
+                prep =
+                    Maybe.map makeSigningPrep args.tx
+
+                makeSigningPrep tx =
+                    { tx = tx
+                    , txId = Transaction.computeTxId tx
+                    , expectedSignatures = List.map .keyHash args.expectedSigners
+                    , signerDescriptions =
+                        List.map (\s -> ( s.keyHash, s.keyName )) args.expectedSigners
+                            |> Bytes.Map.fromList
+                    }
+            in
+            ( { model
+                | error = Nothing
+                , page = SignTxPage <| SignTx.initialModel subject prep
+                , appUrl = appUrl
+              }
+            , pushUrlCmd
+            )
 
 
 
@@ -2706,23 +2774,10 @@ view model =
             let
                 viewContext =
                     { wrapMsg = SignTxMsg
-                    , toCallbackPage =
-                        \subject ->
-                            case subject of
-                                SignTx.Unknown ->
-                                    GoToHomePage
-
-                                SignTx.TreasurySetup ->
-                                    GoToHomePage
-
-                                SignTx.MergeUtxos ->
-                                    GoToHomePage
-
-                                SignTx.Disburse ->
-                                    GoToHomePage
-
-                                SignTx.PublishScript _ ->
-                                    GoToHomePage
+                    , routingConfig =
+                        { ignoreMsg = \_ -> NoMsg
+                        , urlChangedMsg = UrlChanged
+                        }
                     , wallet = model.connectedWallet
                     , networkId = model.networkId
                     }
@@ -3075,7 +3130,7 @@ viewSetupTxsState { txs, treasury, tracking } =
 
 
 viewTxStatus : TxState -> SignTx.Prep -> Html Msg
-viewTxStatus txState ({ txId, tx, expectedSignatures, signerDescriptions } as signingPrep) =
+viewTxStatus txState ({ txId, tx, expectedSignatures, signerDescriptions } as prep) =
     let
         displaySigner signer =
             case Bytes.Map.get signer signerDescriptions of
@@ -3088,9 +3143,8 @@ viewTxStatus txState ({ txId, tx, expectedSignatures, signerDescriptions } as si
         actions =
             case txState of
                 TxNotSubmittedYet ->
-                    Html.button
-                        [ onClick <| SignTxButtonClicked SignTx.TreasurySetup signingPrep ]
-                        [ text "Sign on signing page" ]
+                    Html.button []
+                        [ signingLink prep [] [ text "Sign on signing page" ] ]
 
                 TxSubmitting ->
                     div [] [ text "Tx is being submitted ... ", spinner ]
@@ -3109,6 +3163,28 @@ viewTxStatus txState ({ txId, tx, expectedSignatures, signerDescriptions } as si
         , Html.p [] [ text <| "Tx ID: " ++ Bytes.toHex txId ]
         , Html.pre [] [ text <| prettyTx tx ]
         ]
+
+
+signingLink : SignTx.Prep -> List (Html.Attribute Msg) -> List (Html Msg) -> Html Msg
+signingLink { tx, expectedSignatures, signerDescriptions } attrs children =
+    let
+        expectedSigners =
+            List.map extractKeyName expectedSignatures
+
+        extractKeyName keyHash =
+            Bytes.Map.get keyHash signerDescriptions
+                |> Maybe.withDefault "Unidentified signer"
+                |> (\keyName -> { keyHash = keyHash, keyName = keyName })
+
+        routingConfig =
+            { ignoreMsg = \_ -> NoMsg
+            , urlChangedMsg = UrlChanged
+            }
+    in
+    Route.inAppLink routingConfig
+        (Route.Signing { tx = Just tx, expectedSigners = expectedSigners })
+        attrs
+        children
 
 
 viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
@@ -3443,9 +3519,8 @@ viewMergeUtxosAction maybeWallet mergeState =
                 div []
                     [ Html.p [] [ text "Transaction built successfully." ]
                     , Html.pre [] [ text <| prettyTx tx ]
-                    , Html.button
-                        [ onClick <| SignTxButtonClicked SignTx.MergeUtxos signingPrep ]
-                        [ text "Sign on signing page" ]
+                    , Html.button []
+                        [ signingLink signingPrep [] [ text "Sign on signing page" ] ]
                     , Html.button [ onClick <| TreasuryMergingMsg CancelMergeAction ] [ text "Cancel" ]
                     ]
         ]
@@ -3502,9 +3577,8 @@ viewDisburseAction maybeWallet actionState form =
                 div []
                     [ Html.p [] [ text "Transaction built successfully." ]
                     , Html.pre [] [ text <| prettyTx tx ]
-                    , Html.button
-                        [ onClick <| SignTxButtonClicked SignTx.Disburse signingPrep ]
-                        [ text "Sign on signing page" ]
+                    , Html.button []
+                        [ signingLink signingPrep [] [ text "Sign on signing page" ] ]
                     , Html.button [ onClick <| TreasuryDisburseMsg CancelDisburseAction ] [ text "Cancel" ]
                     ]
         ]

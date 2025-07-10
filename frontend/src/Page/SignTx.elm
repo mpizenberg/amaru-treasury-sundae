@@ -26,6 +26,7 @@ import Html.Attributes as HA
 import Html.Events exposing (onClick)
 import Json.Decode as JD
 import Json.Encode as JE
+import Route
 import Set
 import Task
 import Url
@@ -299,7 +300,7 @@ resetSubmission error model =
 
 type alias ViewContext msg =
     { wrapMsg : Msg -> msg
-    , toCallbackPage : Subject -> msg
+    , routingConfig : Route.Config msg
     , wallet : Maybe Cip30.Wallet
     , networkId : NetworkId
     }
@@ -410,25 +411,11 @@ view ctx model =
                                 ]
                             ]
 
+                    callBackLink =
+                        Route.inAppLink ctx.routingConfig Route.Home [] [ text "Cancel signing" ]
+
                     callbackButton =
-                        Html.p [] [ Html.button [ onClick <| ctx.toCallbackPage subject ] [ text <| "Back to page: " ++ callbackPageName ] ]
-
-                    callbackPageName =
-                        case subject of
-                            Unknown ->
-                                "unknown?"
-
-                            TreasurySetup ->
-                                "Treasury setup"
-
-                            MergeUtxos ->
-                                "Merge UTxOs"
-
-                            Disburse ->
-                                "Disburse"
-
-                            PublishScript _ ->
-                                "Treasury management"
+                        Html.p [] [ Html.button [] [ callBackLink ] ]
                 in
                 div []
                     [ div []
