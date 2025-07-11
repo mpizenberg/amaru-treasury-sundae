@@ -41,6 +41,7 @@ import Storage
 import Task
 import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
+import TreasuryManagement
 import Types
 
 
