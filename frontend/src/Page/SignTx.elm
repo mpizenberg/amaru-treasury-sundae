@@ -1,4 +1,4 @@
-module Page.SignTx exposing (Model, Msg, Prep, State, Subject(..), UpdateContext, ViewContext, addWalletSignatures, getTxInfo, initialModel, recordSubmittedTx, resetSubmission, update, view)
+module Page.SignTx exposing (..)
 
 {-| This module handles the signing process for Cardano transactions, particularly
 focusing on complex scenarios like Native or Plutus script multi-signatures.
@@ -518,3 +518,20 @@ shortenedHex visibleChars str =
         String.slice 0 visibleChars str
             ++ "..."
             ++ String.slice (strLength - visibleChars) strLength str
+
+
+signingLink : Route.Config msg -> Prep -> List (Html.Attribute msg) -> List (Html msg) -> Html msg
+signingLink routingConfig { tx, expectedSignatures, signerDescriptions } attrs children =
+    let
+        expectedSigners =
+            List.map extractKeyName expectedSignatures
+
+        extractKeyName keyHash =
+            Bytes.Map.get keyHash signerDescriptions
+                |> Maybe.withDefault "Unidentified signer"
+                |> (\keyName -> { keyHash = keyHash, keyName = keyName })
+    in
+    Route.inAppLink routingConfig
+        (Route.Signing { tx = Just tx, expectedSigners = expectedSigners })
+        attrs
+        children
