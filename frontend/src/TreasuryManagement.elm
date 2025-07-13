@@ -37,6 +37,7 @@ import Storage
 import Task
 import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
+import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import Types
 
 
@@ -158,8 +159,8 @@ updateSetupFormField ctx scripts msg form =
 validateSetup : SetupForm -> SetupFormValidation
 validateSetup form =
     Scopes form.ledgerOwner form.consensusOwner form.mercenariesOwner form.marketingOwner
-        |> scopesMap validateKeyHash
-        |> scopesToResult
+        |> Scopes.map validateKeyHash
+        |> Scopes.toResult
         -- TODO: add some validation of the expiration Int
         |> Result.map (\scopes -> { expiration = form.expiration, scopeOwners = scopes })
 
@@ -218,7 +219,7 @@ type alias LoadingTreasury =
 treasuryLoadingScopes : LoadingTreasury -> List LoadingScope
 treasuryLoadingScopes { scopes, contingency } =
     -- The list order is the same as the order of the scopes
-    scopesToList scopes ++ [ contingency ]
+    Scopes.toList scopes ++ [ contingency ]
 
 
 type alias LoadingParams =
@@ -366,14 +367,14 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
     let
         scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
         scopesTreasuryScriptsResult =
-            scopesToResult <|
-                scopesMap2 (\( registryHash, _ ) ( permissionsHash, _ ) -> setupTreasury loadingParams.expiration registryHash permissionsHash scripts.sundaeTreasury)
+            Scopes.toResult <|
+                Scopes.map2 (\( registryHash, _ ) ( permissionsHash, _ ) -> setupTreasury loadingParams.expiration registryHash permissionsHash scripts.sundaeTreasury)
                     scopesRegistries
                     scopesPermissions
 
         scopesTreasuriesResult : Result String (Scopes ( Bytes CredentialHash, PlutusScript ))
         scopesTreasuriesResult =
-            Result.map (scopesMap (\script -> ( Script.hash <| Script.Plutus script, script ))) scopesTreasuryScriptsResult
+            Result.map (Scopes.map (\script -> ( Script.hash <| Script.Plutus script, script ))) scopesTreasuryScriptsResult
 
         contingencyTreasuryResult : Result String ( Bytes CredentialHash, PlutusScript )
         contingencyTreasuryResult =
@@ -437,10 +438,10 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
 
         scopesResult : Bytes TransactionId -> Transaction -> Scopes ( Bytes CredentialHash, PlutusScript ) -> Result String (Scopes Scope)
         scopesResult txId registryTx scopesTreasuries =
-            scopesToResult <|
-                scopesMap4 (setupScope txId registryTx)
+            Scopes.toResult <|
+                Scopes.map4 (setupScope txId registryTx)
                     scopeOwners
-                    (scopesMap Tuple.first scopesRegistries)
+                    (Scopes.map Tuple.first scopesRegistries)
                     scopesPermissions
                     scopesTreasuries
 
@@ -451,7 +452,7 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
     Result.map2 Tuple.pair scopesTreasuriesResult contingencyTreasuryResult
         |> Result.andThen
             (\( scopesTreasuries, contingencyTreasury ) ->
-                createRegistriesTx (scopesMap Tuple.first scopesTreasuries) (Tuple.first contingencyTreasury)
+                createRegistriesTx (Scopes.map Tuple.first scopesTreasuries) (Tuple.first contingencyTreasury)
                     |> Result.andThen
                         (\txFinalized ->
                             let
@@ -537,7 +538,7 @@ setupAmaruScopes localStateUtxos scopesTrapScript networkId connectedWallet scop
                     ( scriptHash, Bytes.fromText "amaru scopes" )
 
                 scopesDatum =
-                    scopesToList scopeOwners
+                    Scopes.toList scopeOwners
                         |> List.map MultisigScript.toData
                         |> Data.Constr N.zero
                         |> Utxo.datumValueFromData
@@ -603,8 +604,8 @@ setupPermissions localStateUtxos scopePermissionsScript connectedWallet ( { tx }
         scopesPermissionsResult : Result String (Scopes ( Bytes CredentialHash, PlutusScript ))
         scopesPermissionsResult =
             Scopes 0 1 2 3
-                |> scopesMap applyPermissionsScript
-                |> scopesToResult
+                |> Scopes.map applyPermissionsScript
+                |> Scopes.toResult
 
         createPermissionsStakeRegTx : List ( Bytes CredentialHash, PlutusScript ) -> Result TxFinalizationError TxFinalized
         createPermissionsStakeRegTx permissions =
@@ -641,7 +642,7 @@ setupPermissions localStateUtxos scopePermissionsScript connectedWallet ( { tx }
     Result.map2 Tuple.pair scopesPermissionsResult (applyPermissionsScript 4)
         |> Result.andThen
             (\( scopePermissions, contingencyPermissions ) ->
-                createPermissionsStakeRegTx (scopesToList scopePermissions ++ [ contingencyPermissions ])
+                createPermissionsStakeRegTx (Scopes.toList scopePermissions ++ [ contingencyPermissions ])
                     |> Result.mapError TxIntent.errorToString
                     |> Result.map (\txFinalized -> ( txFinalized, scopePermissions, contingencyPermissions ))
             )
@@ -662,8 +663,8 @@ setupRegistries registryTrapScript registriesSeedUtxo =
 
         scopesRegistries =
             Scopes 0 1 2 3
-                |> scopesMap (applyRegistryScript >> Result.map andComputeHash)
-                |> scopesToResult
+                |> Scopes.map (applyRegistryScript >> Result.map andComputeHash)
+                |> Scopes.toResult
 
         contingencyRegistry =
             applyRegistryScript 4 |> Result.map andComputeHash
@@ -844,7 +845,7 @@ doubleCheckTreasuryScriptsHashes treasuryManagement treasuryLoadingParamsForm =
     -- match the ones obtained from the registry datums
     case treasuryManagement of
         TreasuryFullyLoaded loadedTreasury ->
-            (scopesToList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
+            (Scopes.toList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
                 |> Result.Extra.combineMap doublecheckTreasuryScriptHash
                 |> Result.Extra.unpack
                     (\error ->
@@ -888,51 +889,6 @@ doublecheckTreasuryScriptHash { sundaeTreasuryScript, registryUtxo } =
                 else
                     Err <| "Treasury script hash mismatch between the one in the onchain registry UTxO, and the one re-computed from the treasury script blueprint. Make sure you are compiling the aiken contracts with the correct debug options."
             )
-
-
-type alias Scopes a =
-    { ledger : a
-    , consensus : a
-    , mercenaries : a
-    , marketing : a
-    }
-
-
-scopesToList : Scopes a -> List a
-scopesToList { ledger, consensus, mercenaries, marketing } =
-    [ ledger, consensus, mercenaries, marketing ]
-
-
-scopesToResult : Scopes (Result err a) -> Result err (Scopes a)
-scopesToResult { ledger, consensus, mercenaries, marketing } =
-    Result.map4 Scopes ledger consensus mercenaries marketing
-
-
-scopesMap : (a -> b) -> Scopes a -> Scopes b
-scopesMap f { ledger, consensus, mercenaries, marketing } =
-    { ledger = f ledger
-    , consensus = f consensus
-    , mercenaries = f mercenaries
-    , marketing = f marketing
-    }
-
-
-scopesMap2 : (a -> b -> c) -> Scopes a -> Scopes b -> Scopes c
-scopesMap2 f s1 s2 =
-    { ledger = f s1.ledger s2.ledger
-    , consensus = f s1.consensus s2.consensus
-    , mercenaries = f s1.mercenaries s2.mercenaries
-    , marketing = f s1.marketing s2.marketing
-    }
-
-
-scopesMap4 : (a -> b -> c -> d -> e) -> Scopes a -> Scopes b -> Scopes c -> Scopes d -> Scopes e
-scopesMap4 f s1 s2 s3 s4 =
-    { ledger = f s1.ledger s2.ledger s3.ledger s4.ledger
-    , consensus = f s1.consensus s2.consensus s3.consensus s4.consensus
-    , mercenaries = f s1.mercenaries s2.mercenaries s3.mercenaries s4.mercenaries
-    , marketing = f s1.marketing s2.marketing s3.marketing s4.marketing
-    }
 
 
 type alias Scope =
@@ -1360,8 +1316,8 @@ startTreasuryLoading ctx model =
         Ok loadingTreasury ->
             let
                 allPermissionsScriptHashes =
-                    scopesMap (\s -> Tuple.first s.permissionsScriptApplied) loadingTreasury.scopes
-                        |> scopesToList
+                    Scopes.map (\s -> Tuple.first s.permissionsScriptApplied) loadingTreasury.scopes
+                        |> Scopes.toList
                         |> (\list -> list ++ [ Tuple.first loadingTreasury.contingency.permissionsScriptApplied ])
 
                 loadPermissionsRefScriptsUtxosTask : List (ConcurrentTask String TaskCompleted)
@@ -1425,7 +1381,7 @@ refreshTreasuryUtxos ctx model =
         TreasuryFullyLoaded loadedTreasury ->
             let
                 allTreasuriesScriptHashes =
-                    (scopesToList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
+                    (Scopes.toList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
                         |> List.map (\scope -> Tuple.first scope.sundaeTreasuryScript)
 
                 allTreasuriesUtxosTask : ConcurrentTask String TaskCompleted
@@ -1454,7 +1410,7 @@ refreshTreasuryUtxos ctx model =
                             ConcurrentTask.fail "Something unexpected happened while trying to retrieve treasuries UTxOs"
 
                 allTreasuryUtxos =
-                    (scopesToList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
+                    (Scopes.toList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
                         |> List.concatMap (\scope -> Dict.Any.keys scope.treasuryUtxos)
 
                 cleanedLocalState =
@@ -1463,7 +1419,7 @@ refreshTreasuryUtxos ctx model =
                 loadingTreasury =
                     { loadingParams = loadedTreasury.loadingParams
                     , rootUtxo = RemoteData.Success loadedTreasury.rootUtxo
-                    , scopes = scopesMap reloadScopeTreasury loadedTreasury.scopes
+                    , scopes = Scopes.map reloadScopeTreasury loadedTreasury.scopes
                     , contingency = reloadScopeTreasury loadedTreasury.contingency
                     }
 
@@ -1989,7 +1945,7 @@ handleCompletedTask ctx taskCompleted model =
                                     case treasuryManagement of
                                         TreasuryLoading { scopes, contingency } ->
                                             -- The list order is the same as the order of the scopes
-                                            scopesToList scopes ++ [ contingency ]
+                                            Scopes.toList scopes ++ [ contingency ]
 
                                         _ ->
                                             []
@@ -2080,7 +2036,7 @@ handleCompletedTask ctx taskCompleted model =
             updateTreasuryLoading ctx.localStateUtxos model <|
                 \({ scopes, contingency } as loadingTreasury) ->
                     { loadingTreasury
-                        | scopes = scopesMap updateTreasuryRefScriptIfGoodScope scopes
+                        | scopes = Scopes.map updateTreasuryRefScriptIfGoodScope scopes
                         , contingency = updateTreasuryRefScriptIfGoodScope contingency
                     }
 
@@ -2096,7 +2052,7 @@ handleCompletedTask ctx taskCompleted model =
             updateTreasuryLoading ctx.localStateUtxos model <|
                 \({ scopes, contingency } as loadingTreasury) ->
                     { loadingTreasury
-                        | scopes = scopesMap updatePermissionsRefScriptIfGoodScope scopes
+                        | scopes = Scopes.map updatePermissionsRefScriptIfGoodScope scopes
                         , contingency = updatePermissionsRefScriptIfGoodScope contingency
                     }
 
@@ -2196,12 +2152,12 @@ applySundaeTreasuryScript unappliedScript scope =
 
 setRegistryUtxos : Scopes ( OutputReference, Output ) -> Scopes LoadingScope -> Scopes LoadingScope
 setRegistryUtxos registryUtxos scopes =
-    scopesMap2 (\utxo loadingScope -> { loadingScope | registryUtxo = RemoteData.Success utxo }) registryUtxos scopes
+    Scopes.map2 (\utxo loadingScope -> { loadingScope | registryUtxo = RemoteData.Success utxo }) registryUtxos scopes
 
 
 setTreasuryUtxos : Scopes (Utxo.RefDict Output) -> Scopes LoadingScope -> Scopes LoadingScope
 setTreasuryUtxos treasuryUtxos scopes =
-    scopesMap2 (\utxos loadingScope -> { loadingScope | treasuryUtxos = RemoteData.Success utxos }) treasuryUtxos scopes
+    Scopes.map2 (\utxos loadingScope -> { loadingScope | treasuryUtxos = RemoteData.Success utxos }) treasuryUtxos scopes
 
 
 updateTreasuryLoading : Utxo.RefDict Output -> Model -> (LoadingTreasury -> LoadingTreasury) -> ( Model, Cmd msg, OutMsg )
@@ -2442,8 +2398,8 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
                     Tuple.first rootUtxo
 
                 allOwners =
-                    scopesMap .owner scopes
-                        |> scopesToList
+                    Scopes.map .owner scopes
+                        |> Scopes.toList
                         |> List.Extra.zip [ "ledger", "consensus", "mercenaries", "marketing" ]
             in
             div []
