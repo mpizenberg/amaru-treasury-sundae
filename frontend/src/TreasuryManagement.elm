@@ -36,6 +36,7 @@ import Storage
 import Task
 import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
+import TreasuryManagement.Scope exposing (Scope)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import TreasuryManagement.Setup exposing (Scripts, SetupTxs)
 import TreasuryManagement.SetupForm as SetupForm exposing (SetupForm)
@@ -314,19 +315,6 @@ doublecheckTreasuryScriptHash { sundaeTreasuryScript, registryUtxo } =
                 else
                     Err <| "Treasury script hash mismatch between the one in the onchain registry UTxO, and the one re-computed from the treasury script blueprint. Make sure you are compiling the aiken contracts with the correct debug options."
             )
-
-
-type alias Scope =
-    { owner : MultisigScript
-    , permissionsScript : ( Bytes CredentialHash, PlutusScript )
-    , permissionsScriptRef : Maybe ( OutputReference, Output )
-    , sundaeTreasuryScript : ( Bytes CredentialHash, PlutusScript )
-    , sundaeTreasuryScriptRef : Maybe ( OutputReference, Output )
-    , registryUtxo : ( OutputReference, Output )
-
-    -- TODO: make sure they are updated after every Tx
-    , treasuryUtxos : Utxo.RefDict Output
-    }
 
 
 type TreasuryAction
