@@ -27,6 +27,7 @@ import Result.Extra
 import Route exposing (Route)
 import Storage
 import TreasuryManagement exposing (ActionStatus(..), SetupFormMsg(..), TreasuryAction(..), TreasuryLoadingParamsForm, TreasuryManagement(..), TxState(..))
+import TreasuryManagement.Setup
 
 
 type alias Flags =
@@ -125,7 +126,7 @@ type alias Model =
     }
 
 
-initialModel : JD.Value -> TreasuryManagement.Scripts -> Int -> Model
+initialModel : JD.Value -> TreasuryManagement.Setup.Scripts -> Int -> Model
 initialModel db scripts posixTimeMs =
     let
         treasuryLoadingParams =
