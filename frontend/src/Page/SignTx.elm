@@ -30,6 +30,7 @@ import Route
 import Set
 import Task
 import Url
+import Utils exposing (viewError)
 
 
 
@@ -488,19 +489,6 @@ viewExpectedSignatures prep vkeyWitnesses =
                     Html.p [] [ text <| "□ " ++ keyName ++ ": " ++ shortenedHex 8 (Bytes.toHex keyHash) ]
     in
     List.map viewExpectedSigner prep.expectedSignatures
-
-
-viewError : Maybe String -> Html msg
-viewError error =
-    case error of
-        Nothing ->
-            text ""
-
-        Just err ->
-            Html.div [ HA.style "background-color" "#FEF2F2" ]
-                [ Html.p [] [ text "Error" ]
-                , Html.pre [] [ text err ]
-                ]
 
 
 {-| Shorten some string, by only keeping the first and last few characters.

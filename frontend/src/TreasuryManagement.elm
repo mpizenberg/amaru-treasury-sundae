@@ -41,6 +41,7 @@ import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import TreasuryManagement.Setup exposing (Scripts, SetupTxs)
 import TreasuryManagement.SetupForm as SetupForm exposing (SetupForm)
 import Types
+import Utils exposing (displayPosixDate, viewError)
 
 
 type alias Model =
@@ -1811,7 +1812,7 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
                         ]
                     , Html.button [ onClick StartTreasuryLoading ]
                         [ text "Load treasury" ]
-                    , viewFormErrors params.error
+                    , viewError params.error
                     ]
 
         TreasurySetupForm form ->
@@ -1880,44 +1881,6 @@ viewRegistriesSeedUtxo { transactionId, outputIndex } =
 viewExpirationDate : Int -> Html msg
 viewExpirationDate posixDate =
     Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt posixDate ++ " (" ++ displayPosixDate (Time.millisToPosix posixDate) ++ ")" ]
-
-
-displayPosixDate : Posix -> String
-displayPosixDate posix =
-    let
-        year =
-            Time.toYear Time.utc posix
-                |> String.fromInt
-
-        month =
-            Time.toMonth Time.utc posix
-                |> Debug.toString
-
-        day =
-            Time.toDay Time.utc posix
-                |> String.fromInt
-
-        hour =
-            Time.toHour Time.utc posix
-                |> String.fromInt
-                |> String.padLeft 2 '0'
-
-        minutes =
-            Time.toMinute Time.utc posix
-                |> String.fromInt
-                |> String.padLeft 2 '0'
-    in
-    "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day ++ " - " ++ hour ++ ":" ++ minutes
-
-
-viewFormErrors : Maybe String -> Html msg
-viewFormErrors maybeErrors =
-    case maybeErrors of
-        Nothing ->
-            text ""
-
-        Just errors ->
-            Html.pre [ HA.style "color" "red" ] [ text errors ]
 
 
 viewSetupTxsState : ViewContext a msg -> SetupTxsState -> Html msg
@@ -2341,7 +2304,7 @@ viewDisburseAction { toMsg, routingConfig, connectedWallet } actionState form =
                                 , Html.h4 [] [ text "Tx building" ]
                                 , Html.button [ onClick BuildDisburseTransaction ] [ text "Build Transaction" ]
                                 , Html.button [ onClick CancelDisburseAction ] [ text "Cancel" ]
-                                , viewFormErrors form.error
+                                , viewError form.error
                                 ]
 
             BuildingFailure error ->

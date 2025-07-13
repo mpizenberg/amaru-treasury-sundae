@@ -7,6 +7,7 @@ import Html.Events as HE exposing (onClick)
 import MultisigScript exposing (MultisigScript)
 import Time exposing (Posix)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
+import Utils exposing (displayPosixDate, viewError)
 
 
 type alias SetupForm =
@@ -140,7 +141,7 @@ viewTreasurySetupFormHelper ctx form errors =
             [ Html.button [ onClick (ctx.toMsg ValidateSetupForm) ]
                 [ text "Validate scope owners & prepare Txs" ]
             ]
-        , viewFormErrors errors
+        , viewError errors
         ]
 
 
@@ -156,16 +157,6 @@ viewFormField label value fieldMsg =
             ]
             []
         ]
-
-
-viewFormErrors : Maybe String -> Html msg
-viewFormErrors maybeErrors =
-    case maybeErrors of
-        Nothing ->
-            text ""
-
-        Just errors ->
-            Html.pre [ HA.style "color" "red" ] [ text errors ]
 
 
 viewScopeOwnersSetup : ViewContext msg -> Int -> Scopes MultisigScript -> Html msg
@@ -185,31 +176,3 @@ viewScopeOwnersSetup ctx expiration scopeOwners =
                 [ text "Build the Txs" ]
             ]
         ]
-
-
-displayPosixDate : Posix -> String
-displayPosixDate posix =
-    let
-        year =
-            Time.toYear Time.utc posix
-                |> String.fromInt
-
-        month =
-            Time.toMonth Time.utc posix
-                |> Debug.toString
-
-        day =
-            Time.toDay Time.utc posix
-                |> String.fromInt
-
-        hour =
-            Time.toHour Time.utc posix
-                |> String.fromInt
-                |> String.padLeft 2 '0'
-
-        minutes =
-            Time.toMinute Time.utc posix
-                |> String.fromInt
-                |> String.padLeft 2 '0'
-    in
-    "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day ++ " - " ++ hour ++ ":" ++ minutes
