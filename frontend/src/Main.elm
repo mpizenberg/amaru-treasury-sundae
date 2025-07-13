@@ -26,7 +26,8 @@ import Platform.Cmd as Cmd
 import Result.Extra
 import Route exposing (Route)
 import Storage
-import TreasuryManagement exposing (ActionStatus(..), TreasuryAction(..), TreasuryLoadingParamsForm, TreasuryManagement(..), TxState(..))
+import TreasuryManagement exposing (ActionStatus(..), TreasuryAction(..), TreasuryManagement(..), TxState(..))
+import TreasuryManagement.LoadingParams as LoadingParams
 import TreasuryManagement.Setup
 
 
@@ -98,7 +99,7 @@ type Msg
 
 
 type TaskCompleted
-    = ReadLoadingParams (Maybe TreasuryLoadingParamsForm)
+    = ReadLoadingParams (Maybe LoadingParams.Form)
     | LoadingParamsSaved
     | TreasuryManagementTask TreasuryManagement.TaskCompleted
 
@@ -202,7 +203,7 @@ init { url, db, blueprints, posixTimeMs } =
                 (initialModel db scripts posixTimeMs)
 
         ( updatedTaskPool, readTreasuryParamsCmd ) =
-            Storage.read { db = db, storeName = "stuff" } TreasuryManagement.treasuryLoadingParamsFormDecoder { key = "treasuryLoadingParams" }
+            Storage.read { db = db, storeName = "stuff" } LoadingParams.formDecoder { key = "treasuryLoadingParams" }
                 |> ConcurrentTask.map Just
                 |> ConcurrentTask.onError (\_ -> ConcurrentTask.succeed Nothing)
                 |> ConcurrentTask.map ReadLoadingParams

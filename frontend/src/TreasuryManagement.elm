@@ -23,7 +23,6 @@ import Html exposing (Html, div, text)
 import Html.Attributes as HA
 import Html.Events as HE exposing (onClick)
 import Json.Decode as JD
-import Json.Encode as JE
 import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
@@ -36,6 +35,7 @@ import Storage
 import Task
 import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
+import TreasuryManagement.LoadingParams as LoadingParams exposing (LoadingParams)
 import TreasuryManagement.Scope exposing (Scope)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import TreasuryManagement.Setup exposing (Scripts, SetupTxs)
@@ -45,7 +45,7 @@ import Utils exposing (displayPosixDate, viewError)
 
 
 type alias Model =
-    { treasuryLoadingParamsForm : TreasuryLoadingParamsForm
+    { treasuryLoadingParamsForm : LoadingParams.Form
     , treasuryManagement : TreasuryManagement
     , treasuryAction : TreasuryAction
     , scripts : Scripts
@@ -53,7 +53,7 @@ type alias Model =
     }
 
 
-init : Scripts -> TreasuryLoadingParamsForm -> Model
+init : Scripts -> LoadingParams.Form -> Model
 init scripts treasuryLoadingParamsForm =
     { treasuryLoadingParamsForm = treasuryLoadingParamsForm
     , treasuryManagement = TreasuryUnspecified
@@ -63,7 +63,7 @@ init scripts treasuryLoadingParamsForm =
     }
 
 
-setLoadingParamsForm : TreasuryLoadingParamsForm -> Model -> Model
+setLoadingParamsForm : LoadingParams.Form -> Model -> Model
 setLoadingParamsForm treasuryLoadingParamsForm model =
     { model | treasuryLoadingParamsForm = treasuryLoadingParamsForm }
 
@@ -117,27 +117,6 @@ treasuryLoadingScopes : LoadingTreasury -> List LoadingScope
 treasuryLoadingScopes { scopes, contingency } =
     -- The list order is the same as the order of the scopes
     Scopes.toList scopes ++ [ contingency ]
-
-
-type alias LoadingParams =
-    { pragmaScriptHash : Bytes CredentialHash
-    , registriesSeedUtxo : OutputReference
-    , expiration : Posix
-    }
-
-
-encodeLoadingParams : LoadingParams -> JE.Value
-encodeLoadingParams { pragmaScriptHash, registriesSeedUtxo, expiration } =
-    JE.object
-        [ ( "pragmaScriptHash", JE.string <| Bytes.toHex pragmaScriptHash )
-        , ( "registriesSeedUtxo"
-          , JE.object
-                [ ( "transactionId", JE.string <| Bytes.toHex registriesSeedUtxo.transactionId )
-                , ( "outputIndex", JE.int registriesSeedUtxo.outputIndex )
-                ]
-          )
-        , ( "treasuryConfigExpiration", JE.int <| Time.posixToMillis expiration )
-        ]
 
 
 type alias LoadingScope =
@@ -266,7 +245,7 @@ addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketi
         |> Dict.Any.insert rootRef rootOutput
 
 
-doubleCheckTreasuryScriptsHashes : TreasuryManagement -> TreasuryLoadingParamsForm -> ( TreasuryManagement, TreasuryLoadingParamsForm )
+doubleCheckTreasuryScriptsHashes : TreasuryManagement -> LoadingParams.Form -> ( TreasuryManagement, LoadingParams.Form )
 doubleCheckTreasuryScriptsHashes treasuryManagement treasuryLoadingParamsForm =
     -- Make sure the scripts hashes obtained from applying the scripts
     -- match the ones obtained from the registry datums
@@ -346,55 +325,9 @@ type alias DisburseForm =
     }
 
 
-type alias TreasuryLoadingParamsForm =
-    { pragmaScriptHash : String
-    , registriesSeedUtxo : { transactionId : String, outputIndex : Int }
-    , treasuryConfigExpiration : Int
-    , error : Maybe String
-    }
-
-
-treasuryLoadingParamsFormDecoder : JD.Decoder TreasuryLoadingParamsForm
-treasuryLoadingParamsFormDecoder =
-    JD.map4 TreasuryLoadingParamsForm
-        (JD.field "pragmaScriptHash" JD.string)
-        (JD.field "registriesSeedUtxo"
-            (JD.map2 (\a b -> { transactionId = a, outputIndex = b })
-                (JD.field "transactionId" JD.string)
-                (JD.field "outputIndex" JD.int)
-            )
-        )
-        (JD.field "treasuryConfigExpiration" JD.int)
-        (JD.succeed Nothing)
-
-
-validateLoadingParams : TreasuryLoadingParamsForm -> Result String LoadingParams
-validateLoadingParams formParams =
-    case ( Bytes.fromHex formParams.pragmaScriptHash, Bytes.fromHex formParams.registriesSeedUtxo.transactionId ) of
-        ( Nothing, _ ) ->
-            Err <| "Pragma script hash is not a valid hex string: " ++ formParams.pragmaScriptHash
-
-        ( _, Nothing ) ->
-            Err <| "Registries seed utxo transaction id is not a valid hex string: " ++ formParams.registriesSeedUtxo.transactionId
-
-        ( Just scriptHash, Just transactionId ) ->
-            if Bytes.width scriptHash /= 28 then
-                Err <| "Pragma script hash is " ++ String.fromInt (Bytes.width scriptHash) ++ " bytes long, but expected 28"
-
-            else if Bytes.width transactionId /= 32 then
-                Err <| "Registries seed utxo transaction id is " ++ String.fromInt (Bytes.width transactionId) ++ " bytes long, but expected 32"
-
-            else
-                Ok
-                    { pragmaScriptHash = scriptHash
-                    , registriesSeedUtxo = OutputReference transactionId formParams.registriesSeedUtxo.outputIndex
-                    , expiration = Time.millisToPosix formParams.treasuryConfigExpiration
-                    }
-
-
-initLoadingTreasury : Scripts -> TreasuryLoadingParamsForm -> Result String LoadingTreasury
+initLoadingTreasury : Scripts -> LoadingParams.Form -> Result String LoadingTreasury
 initLoadingTreasury unappliedScripts formParams =
-    validateLoadingParams formParams
+    LoadingParams.validate formParams
         |> Result.andThen
             (\params ->
                 let
@@ -512,19 +445,12 @@ type Msg
     | StartTreasurySetupWithCurrentTime Posix
     | UpdateSetupForm SetupForm.Msg
     | TryBuildSetupTxs
-    | TreasuryLoadingParamsMsg TreasuryLoadingParamsMsg
+    | TreasuryLoadingParamsMsg LoadingParams.Msg
     | StartTreasuryLoading
     | RefreshTreasuryUtxos
     | TreasuryMergingMsg TreasuryMergingMsg
     | TreasuryDisburseMsg TreasuryDisburseMsg
     | PublishScript (Bytes CredentialHash) PlutusScript
-
-
-type TreasuryLoadingParamsMsg
-    = UpdatePragmaScriptHash String
-    | UpdateRegistriesSeedTransactionId String
-    | UpdateRegistriesSeedOutputIndex String
-    | UpdateExpiration String
 
 
 type TreasuryMergingMsg
@@ -611,7 +537,7 @@ update ctx msg model =
                     ( model, Cmd.none, noOutMsg )
 
         TreasuryLoadingParamsMsg paramsMsg ->
-            ( handleTreasuryLoadingParamsMsg paramsMsg model, Cmd.none, noOutMsg )
+            ( { model | treasuryLoadingParamsForm = LoadingParams.updateForm paramsMsg model.treasuryLoadingParamsForm }, Cmd.none, noOutMsg )
 
         StartTreasuryLoading ->
             startTreasuryLoading ctx model
@@ -657,39 +583,6 @@ handleBuildSetupTxs ctx scripts form =
 
         _ ->
             TreasurySetupForm form
-
-
-handleTreasuryLoadingParamsMsg : TreasuryLoadingParamsMsg -> Model -> Model
-handleTreasuryLoadingParamsMsg msg ({ treasuryLoadingParamsForm } as model) =
-    let
-        newParams params =
-            { model | treasuryLoadingParamsForm = { params | error = Nothing } }
-
-        currentUtxo =
-            treasuryLoadingParamsForm.registriesSeedUtxo
-    in
-    case msg of
-        UpdatePragmaScriptHash value ->
-            newParams { treasuryLoadingParamsForm | pragmaScriptHash = value }
-
-        UpdateRegistriesSeedTransactionId value ->
-            newParams { treasuryLoadingParamsForm | registriesSeedUtxo = { currentUtxo | transactionId = value } }
-
-        UpdateRegistriesSeedOutputIndex value ->
-            case String.toInt value of
-                Just outputIndex ->
-                    newParams { treasuryLoadingParamsForm | registriesSeedUtxo = { currentUtxo | outputIndex = outputIndex } }
-
-                Nothing ->
-                    model
-
-        UpdateExpiration value ->
-            case String.toInt value of
-                Just expiration ->
-                    newParams { treasuryLoadingParamsForm | treasuryConfigExpiration = expiration }
-
-                Nothing ->
-                    model
 
 
 startTreasuryLoading : UpdateContext a msg -> Model -> ( Model, Cmd msg, OutMsg )
@@ -788,7 +681,7 @@ startTreasuryLoading ctx model =
                 saveTreasuryLoadingParamsTask : ConcurrentTask String TaskCompleted
                 saveTreasuryLoadingParamsTask =
                     Storage.write { db = ctx.db, storeName = "stuff" }
-                        encodeLoadingParams
+                        LoadingParams.encode
                         { key = "treasuryLoadingParams" }
                         loadingTreasury.loadingParams
                         |> ConcurrentTask.map (\_ -> LoadingParamsSaved)
@@ -1760,7 +1653,7 @@ view ctx model =
             viewDisburseAction ctx disburseState form
 
 
-viewTreasurySection : ViewContext a msg -> TreasuryLoadingParamsForm -> TreasuryManagement -> Html msg
+viewTreasurySection : ViewContext a msg -> LoadingParams.Form -> TreasuryManagement -> Html msg
 viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
@@ -1771,45 +1664,8 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
                         [ text "Setup a new treasury" ]
                     , Html.h2 [] [ Html.text "Load an existing treasury" ]
                     , Html.p [] [ text "With the following parameters:" ]
-                    , Html.p []
-                        [ Html.label [] [ text "Pragma Scopes script hash: " ]
-                        , Html.input
-                            [ HA.type_ "text"
-                            , HA.placeholder "44dd0678ba5f89b41869362ea3d3e509f94e48bd57be57faedaad0c6"
-                            , HA.value params.pragmaScriptHash
-                            , HE.onInput (TreasuryLoadingParamsMsg << UpdatePragmaScriptHash)
-                            ]
-                            []
-                        ]
-                    , Html.p []
-                        [ Html.label [] [ text "Registries Seed UTxO - Tx ID: " ]
-                        , Html.input
-                            [ HA.type_ "text"
-                            , HA.placeholder "9737488cbd45bc71d5c12490865b20ec8aa9f74b3110f4c2aa588b5e1e09dad6"
-                            , HA.value params.registriesSeedUtxo.transactionId
-                            , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedTransactionId)
-                            ]
-                            []
-                        , Html.label [] [ text " - Output Index: # " ]
-                        , Html.input
-                            [ HA.type_ "number"
-                            , HA.size 2
-                            , HA.min "0"
-                            , HA.value <| String.fromInt params.registriesSeedUtxo.outputIndex
-                            , HE.onInput (TreasuryLoadingParamsMsg << UpdateRegistriesSeedOutputIndex)
-                            ]
-                            []
-                        ]
-                    , Html.p []
-                        [ Html.label [] [ text "Expiration date (Posix): " ]
-                        , Html.input
-                            [ HA.type_ "number"
-                            , HA.value <| String.fromInt params.treasuryConfigExpiration
-                            , HE.onInput (TreasuryLoadingParamsMsg << UpdateExpiration)
-                            ]
-                            []
-                        , text <| " (" ++ displayPosixDate (Time.millisToPosix params.treasuryConfigExpiration) ++ ")"
-                        ]
+                    , Html.map TreasuryLoadingParamsMsg <|
+                        LoadingParams.viewForm params
                     , Html.button [ onClick StartTreasuryLoading ]
                         [ text "Load treasury" ]
                     , viewError params.error
@@ -1848,7 +1704,7 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
             in
             div []
                 [ Html.p [] [ text "Treasury fully loaded" ]
-                , viewReload loadingParams
+                , LoadingParams.viewReload loadingParams
                 , viewRootUtxo rootUtxo
                 , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "ledger" scopes.ledger
                 , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "consensus" scopes.consensus
@@ -1856,16 +1712,6 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
                 , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "marketing" scopes.marketing
                 , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "contingency" contingency
                 ]
-
-
-viewReload : LoadingParams -> Html msg
-viewReload { pragmaScriptHash, registriesSeedUtxo, expiration } =
-    Html.div [ HA.style "padding" "16px", HA.style "box-shadow" "0 0 16px rgba(0, 0, 0, 0.2)" ]
-        [ Html.p [] [ Html.strong [] [ text "KEEP this to be able to reload the Treasury:" ] ]
-        , viewPragmaScopesScriptHash pragmaScriptHash
-        , viewRegistriesSeedUtxo registriesSeedUtxo
-        , viewExpirationDate <| Time.posixToMillis expiration
-        ]
 
 
 viewPragmaScopesScriptHash : Bytes CredentialHash -> Html msg
