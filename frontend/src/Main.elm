@@ -26,7 +26,7 @@ import Platform.Cmd as Cmd
 import Result.Extra
 import Route exposing (Route)
 import Storage
-import TreasuryManagement exposing (ActionStatus(..), SetupFormMsg(..), TreasuryAction(..), TreasuryLoadingParamsForm, TreasuryManagement(..), TxState(..))
+import TreasuryManagement exposing (ActionStatus(..), TreasuryAction(..), TreasuryLoadingParamsForm, TreasuryManagement(..), TxState(..))
 import TreasuryManagement.Setup
 
 

@@ -38,6 +38,7 @@ import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import TreasuryManagement.Setup exposing (Scripts, SetupTxs)
+import TreasuryManagement.SetupForm as SetupForm exposing (SetupForm)
 import Types
 
 
@@ -71,104 +72,6 @@ type TreasuryManagement
     | TreasurySetupTxs SetupTxsState
     | TreasuryLoading LoadingTreasury
     | TreasuryFullyLoaded LoadedTreasury
-
-
-type alias SetupForm =
-    { ledgerOwner : String
-    , consensusOwner : String
-    , mercenariesOwner : String
-    , marketingOwner : String
-    , expiration : Int
-    , validation : Maybe SetupFormValidation
-    }
-
-
-type alias SetupFormValidation =
-    Result String { expiration : Int, scopeOwners : Scopes MultisigScript }
-
-
-initTreasurySetupForm : Posix -> SetupForm
-initTreasurySetupForm currentTime =
-    { ledgerOwner = ""
-    , consensusOwner = ""
-    , mercenariesOwner = ""
-    , marketingOwner = ""
-    , expiration = Time.posixToMillis currentTime
-    , validation = Nothing
-    }
-
-
-type SetupFormMsg
-    = LedgerOwnerField String
-    | ConsensusOwnerField String
-    | MercenariesOwnerField String
-    | MarketingOwnerField String
-    | ExpirationField String
-    | ValidateSetupForm
-    | TryBuildSetupTxs
-
-
-updateSetupFormField : UpdateContext a msg -> Scripts -> SetupFormMsg -> SetupForm -> TreasuryManagement
-updateSetupFormField ctx scripts msg form =
-    case msg of
-        LedgerOwnerField value ->
-            TreasurySetupForm { form | ledgerOwner = value }
-
-        ConsensusOwnerField value ->
-            TreasurySetupForm { form | consensusOwner = value }
-
-        MercenariesOwnerField value ->
-            TreasurySetupForm { form | mercenariesOwner = value }
-
-        MarketingOwnerField value ->
-            TreasurySetupForm { form | marketingOwner = value }
-
-        ExpirationField value ->
-            TreasurySetupForm { form | expiration = Maybe.withDefault 0 <| String.toInt value }
-
-        ValidateSetupForm ->
-            TreasurySetupForm { form | validation = Just <| validateSetup form }
-
-        TryBuildSetupTxs ->
-            case form.validation of
-                Just (Ok scopeOwners) ->
-                    case ctx.connectedWallet of
-                        Nothing ->
-                            TreasurySetupForm { form | validation = Just <| Err "Please connect wallet first" }
-
-                        Just wallet ->
-                            case TreasuryManagement.Setup.setupAmaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
-                                Err error ->
-                                    TreasurySetupForm { form | validation = Just <| Err error }
-
-                                Ok ( txs, treasury ) ->
-                                    TreasurySetupTxs <| initSetupTxsState txs treasury
-
-                _ ->
-                    TreasurySetupForm form
-
-
-validateSetup : SetupForm -> SetupFormValidation
-validateSetup form =
-    Scopes form.ledgerOwner form.consensusOwner form.mercenariesOwner form.marketingOwner
-        |> Scopes.map validateKeyHash
-        |> Scopes.toResult
-        -- TODO: add some validation of the expiration Int
-        |> Result.map (\scopes -> { expiration = form.expiration, scopeOwners = scopes })
-
-
-validateKeyHash : String -> Result String MultisigScript
-validateKeyHash hex =
-    case Bytes.fromHex hex of
-        Nothing ->
-            Err <| "Invalid hex string: " ++ hex
-
-        Just bytes ->
-            if Bytes.width bytes /= 28 then
-                Err <| "This credential is not 28 bytes long: " ++ Bytes.toHex bytes
-
-            else
-                Ok (MultisigScript.Signature bytes)
 
 
 type alias SetupTxsState =
@@ -618,7 +521,8 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
 type Msg
     = StartTreasurySetup
     | StartTreasurySetupWithCurrentTime Posix
-    | UpdateSetupForm SetupFormMsg
+    | UpdateSetupForm SetupForm.Msg
+    | TryBuildSetupTxs
     | TreasuryLoadingParamsMsg TreasuryLoadingParamsMsg
     | StartTreasuryLoading
     | RefreshTreasuryUtxos
@@ -704,10 +608,18 @@ update ctx msg model =
             )
 
         StartTreasurySetupWithCurrentTime currentTime ->
-            ( { model | treasuryManagement = TreasurySetupForm <| initTreasurySetupForm currentTime }, Cmd.none, noOutMsg )
+            ( { model | treasuryManagement = TreasurySetupForm <| SetupForm.init currentTime }, Cmd.none, noOutMsg )
 
         UpdateSetupForm subMsg ->
-            ( handleTreasurySetupFormUpdate ctx subMsg model, Cmd.none, noOutMsg )
+            ( handleTreasurySetupFormUpdate subMsg model, Cmd.none, noOutMsg )
+
+        TryBuildSetupTxs ->
+            case model.treasuryManagement of
+                TreasurySetupForm form ->
+                    ( { model | treasuryManagement = handleBuildSetupTxs ctx model.scripts form }, Cmd.none, noOutMsg )
+
+                _ ->
+                    ( model, Cmd.none, noOutMsg )
 
         TreasuryLoadingParamsMsg paramsMsg ->
             ( handleTreasuryLoadingParamsMsg paramsMsg model, Cmd.none, noOutMsg )
@@ -728,14 +640,34 @@ update ctx msg model =
             createPublishScriptTx ctx hash script model
 
 
-handleTreasurySetupFormUpdate : UpdateContext a msg -> SetupFormMsg -> Model -> Model
-handleTreasurySetupFormUpdate ctx msg model =
+handleTreasurySetupFormUpdate : SetupForm.Msg -> Model -> Model
+handleTreasurySetupFormUpdate msg model =
     case model.treasuryManagement of
         TreasurySetupForm form ->
-            { model | treasuryManagement = updateSetupFormField ctx model.scripts msg form }
+            { model | treasuryManagement = TreasurySetupForm <| SetupForm.update msg form }
 
         _ ->
             model
+
+
+handleBuildSetupTxs : UpdateContext a msg -> Scripts -> SetupForm -> TreasuryManagement
+handleBuildSetupTxs ctx scripts form =
+    case form.validation of
+        Just (Ok scopeOwners) ->
+            case ctx.connectedWallet of
+                Nothing ->
+                    TreasurySetupForm { form | validation = Just <| Err "Please connect wallet first" }
+
+                Just wallet ->
+                    case TreasuryManagement.Setup.setupAmaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
+                        Err error ->
+                            TreasurySetupForm { form | validation = Just <| Err error }
+
+                        Ok ( txs, treasury ) ->
+                            TreasurySetupTxs <| initSetupTxsState txs treasury
+
+        _ ->
+            TreasurySetupForm form
 
 
 handleTreasuryLoadingParamsMsg : TreasuryLoadingParamsMsg -> Model -> Model
@@ -1895,7 +1827,8 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
                     ]
 
         TreasurySetupForm form ->
-            Html.map toMsg <| viewTreasurySetupForm form
+            Html.map toMsg <|
+                SetupForm.view { toMsg = UpdateSetupForm, tryBuildSetupTxs = TryBuildSetupTxs } form
 
         TreasurySetupTxs state ->
             viewSetupTxsState ctx state
@@ -1987,84 +1920,6 @@ displayPosixDate posix =
                 |> String.padLeft 2 '0'
     in
     "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day ++ " - " ++ hour ++ ":" ++ minutes
-
-
-viewTreasurySetupForm : SetupForm -> Html Msg
-viewTreasurySetupForm form =
-    case form.validation of
-        Nothing ->
-            viewTreasurySetupFormHelper form Nothing
-
-        Just (Err errors) ->
-            viewTreasurySetupFormHelper form (Just errors)
-
-        Just (Ok { expiration, scopeOwners }) ->
-            viewScopeOwnersSetup expiration scopeOwners
-
-
-viewScopeOwnersSetup : Int -> Scopes MultisigScript -> Html Msg
-viewScopeOwnersSetup expiration scopeOwners =
-    div []
-        [ Html.h2 [] [ text "Setup New Treasury" ]
-        , Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt expiration ++ " (" ++ displayPosixDate (Time.millisToPosix expiration) ++ ")" ]
-        , Html.h3 [] [ text "Scope Owners" ]
-        , Html.ul []
-            [ Html.li [] [ text <| "ledger: " ++ Debug.toString scopeOwners.ledger ]
-            , Html.li [] [ text <| "consensus: " ++ Debug.toString scopeOwners.consensus ]
-            , Html.li [] [ text <| "mercenaries: " ++ Debug.toString scopeOwners.mercenaries ]
-            , Html.li [] [ text <| "marketing: " ++ Debug.toString scopeOwners.marketing ]
-            ]
-        , Html.p []
-            [ Html.button [ onClick <| UpdateSetupForm TryBuildSetupTxs ]
-                [ text "Build the Txs" ]
-            ]
-        ]
-
-
-viewTreasurySetupFormHelper : SetupForm -> Maybe String -> Html Msg
-viewTreasurySetupFormHelper form errors =
-    div []
-        [ Html.h2 [] [ text "Setup New Treasury" ]
-        , Html.p []
-            [ Html.label [] [ text "Expiration date (Posix): " ]
-            , Html.input
-                [ HA.type_ "number"
-                , HA.value <| String.fromInt form.expiration
-                , HE.onInput (UpdateSetupForm << ExpirationField)
-                ]
-                []
-            , text <| " (" ++ displayPosixDate (Time.millisToPosix form.expiration) ++ ")"
-            ]
-        , div []
-            [ Html.h3 [] [ text "Scope Owners" ]
-            , Html.p [] [ text "Enter the aicone multisigs for each scope owner (for now just enter a public key hash):" ]
-            ]
-        , div []
-            [ viewFormField "Ledger" form.ledgerOwner LedgerOwnerField
-            , viewFormField "Consensus" form.consensusOwner ConsensusOwnerField
-            , viewFormField "Mercenaries" form.mercenariesOwner MercenariesOwnerField
-            , viewFormField "Marketing" form.marketingOwner MarketingOwnerField
-            ]
-        , Html.p []
-            [ Html.button [ onClick (UpdateSetupForm ValidateSetupForm) ]
-                [ text "Validate scope owners & prepare Txs" ]
-            ]
-        , viewFormErrors errors
-        ]
-
-
-viewFormField : String -> String -> (String -> SetupFormMsg) -> Html Msg
-viewFormField label value field =
-    div []
-        [ Html.label [] [ text <| label ++ ": " ]
-        , Html.input
-            [ HA.type_ "text"
-            , HA.placeholder "Enter public key hash"
-            , HE.onInput (UpdateSetupForm << field)
-            , HA.value value
-            ]
-            []
-        ]
 
 
 viewFormErrors : Maybe String -> Html msg
