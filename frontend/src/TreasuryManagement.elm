@@ -293,6 +293,7 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
 
         TreasuryMergingMsg submsg ->
             handleTreasuryMergingMsg ctx submsg model
+                |> (\updated -> ( Tuple.first updated, Tuple.second updated, noOutMsg ))
 
         TreasuryDisburseMsg submsg ->
             handleTreasuryDisburseMsg ctx submsg model
@@ -332,27 +333,22 @@ handleBuildSetupTxs ctx scripts form =
             TreasurySetupForm form
 
 
-handleTreasuryMergingMsg : UpdateContext a msg -> TreasuryMergingMsg -> Model -> ( Model, Cmd msg, OutMsg )
+handleTreasuryMergingMsg : UpdateContext a msg -> TreasuryMergingMsg -> Model -> ( Model, Cmd msg )
 handleTreasuryMergingMsg ctx msg model =
-    let
-        noOutMsg =
-            OutMsg ctx.localStateUtxos []
-    in
     case msg of
         StartMergeUtxos scopeName scope rootUtxo ->
-            ( handleStartMergeUtxos scopeName scope rootUtxo model, Cmd.none, noOutMsg )
+            ( handleStartMergeUtxos scopeName scope rootUtxo model, Cmd.none )
 
         BuildMergeTransaction requiredSigners ->
             ( model
             , Task.perform (ctx.toMsg << TreasuryMergingMsg << BuildMergeTransactionWithTime requiredSigners) Time.now
-            , noOutMsg
             )
 
         BuildMergeTransactionWithTime requiredSigners currentTime ->
-            ( handleBuildMergeTransaction ctx model requiredSigners currentTime, Cmd.none, noOutMsg )
+            ( handleBuildMergeTransaction ctx model requiredSigners currentTime, Cmd.none )
 
         CancelMergeAction ->
-            ( { model | treasuryAction = NoTreasuryAction }, Cmd.none, noOutMsg )
+            ( { model | treasuryAction = NoTreasuryAction }, Cmd.none )
 
 
 handleStartMergeUtxos : String -> Scope -> OutputReference -> Model -> Model
@@ -369,7 +365,7 @@ handleStartMergeUtxos scopeName scope rootUtxo model =
         { model | treasuryAction = MergeTreasuryUtxos mergeState }
 
     else
-        { model | error = Just "Scope has insufficient UTXOs to merge" }
+        { model | error = Just "Scope has less than 2 UTxOs, so there is nothing to merge." }
 
 
 handleBuildMergeTransaction : UpdateContext a msg -> Model -> List (Bytes CredentialHash) -> Posix -> Model
