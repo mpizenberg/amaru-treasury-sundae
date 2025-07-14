@@ -6,7 +6,6 @@ import Cardano.Address as Address exposing (Credential(..), CredentialHash, Netw
 import Cardano.Cip30 as Cip30
 import Cardano.CoinSelection as CoinSelection
 import Cardano.Data as Data
-import Cardano.MultiAsset exposing (PolicyId)
 import Cardano.Script as Script exposing (NativeScript(..), PlutusScript, PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxExamples exposing (prettyTx)
@@ -27,18 +26,17 @@ import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
 import Platform.Cmd as Cmd
-import RemoteData exposing (RemoteData)
 import Route
 import Task
 import Time exposing (Posix)
 import Treasury exposing (SpendConfig)
-import TreasuryManagement.Loading as Loading exposing (LoadedTreasury, LoadingScope, LoadingTreasury, Scripts, TaskCompleted)
+import TreasuryManagement.Loading as Loading exposing (LoadedTreasury, LoadingTreasury, TaskCompleted, viewRootUtxo)
 import TreasuryManagement.LoadingParams as LoadingParams
-import TreasuryManagement.Scope exposing (Scope)
+import TreasuryManagement.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
 import TreasuryManagement.Scopes as Scopes
 import TreasuryManagement.Setup exposing (SetupTxs)
 import TreasuryManagement.SetupForm as SetupForm exposing (SetupForm)
-import Utils exposing (displayPosixDate, viewError)
+import Utils exposing (spinner, viewError)
 
 
 type alias Model =
@@ -230,15 +228,6 @@ type TreasuryDisburseMsg
     | BuildDisburseTransaction
     | BuildDisburseTransactionWithTime Posix
     | CancelDisburseAction
-
-
-type alias StartDisburseInfo =
-    { scopeName : String
-    , scope : Scope
-    , allOwners : List ( String, MultisigScript )
-    , rootUtxo : OutputReference
-    , spendingUtxo : ( OutputReference, Output )
-    }
 
 
 type alias UpdateContext a msg =
@@ -984,10 +973,10 @@ view ctx model =
 
 
 viewTreasurySection : ViewContext a msg -> LoadingParams.Form -> TreasuryManagement -> Html msg
-viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
+viewTreasurySection ctx params treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
-            Html.map toMsg <|
+            Html.map ctx.toMsg <|
                 div []
                     [ Html.h2 [] [ Html.text "Setup a new treasury" ]
                     , Html.button [ onClick StartTreasurySetup ]
@@ -1002,61 +991,42 @@ viewTreasurySection ({ toMsg, networkId } as ctx) params treasuryManagement =
                     ]
 
         TreasurySetupForm form ->
-            Html.map toMsg <|
+            Html.map ctx.toMsg <|
                 SetupForm.view { toMsg = UpdateSetupForm, tryBuildSetupTxs = TryBuildSetupTxs } form
 
         TreasurySetupTxs state ->
             viewSetupTxsState ctx state
 
-        TreasuryLoading { rootUtxo, loadingParams, scopes, contingency } ->
-            div []
-                [ Html.p [] [ text "Loading treasury ... ", spinner ]
-                , viewLoadingRootUtxo rootUtxo
-                , viewPragmaScopesScriptHash loadingParams.pragmaScriptHash
-                , viewRegistriesSeedUtxo loadingParams.registriesSeedUtxo
-                , viewExpirationDate <| Time.posixToMillis loadingParams.expiration
-                , viewLoadingScope "ledger" scopes.ledger
-                , viewLoadingScope "consensus" scopes.consensus
-                , viewLoadingScope "mercenaries" scopes.mercenaries
-                , viewLoadingScope "marketing" scopes.marketing
-                , viewLoadingScope "contingency" contingency
-                ]
+        TreasuryLoading loadingTreasury ->
+            Loading.viewLoading loadingTreasury
 
         TreasuryFullyLoaded { rootUtxo, loadingParams, scopes, contingency } ->
             let
-                rootUtxoRef =
-                    Tuple.first rootUtxo
-
                 allOwners =
                     Scopes.map .owner scopes
                         |> Scopes.toList
                         |> List.Extra.zip [ "ledger", "consensus", "mercenaries", "marketing" ]
+
+                scopeCtx =
+                    { networkId = ctx.networkId
+                    , rootUtxo = Tuple.first rootUtxo
+                    , allOwners = allOwners
+                    , publishScript = PublishScript
+                    , refreshTreasuryUtxos = RefreshTreasuryUtxos
+                    , startMergingUtxos = \name scope ref -> TreasuryMergingMsg <| StartMergeUtxos name scope ref
+                    , startDisburse = TreasuryDisburseMsg << StartDisburse
+                    }
             in
             div []
                 [ Html.p [] [ text "Treasury fully loaded" ]
                 , LoadingParams.viewReload loadingParams
                 , viewRootUtxo rootUtxo
-                , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "ledger" scopes.ledger
-                , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "consensus" scopes.consensus
-                , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "mercenaries" scopes.mercenaries
-                , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "marketing" scopes.marketing
-                , Html.map toMsg <| viewScope networkId rootUtxoRef allOwners "contingency" contingency
+                , Html.map ctx.toMsg <| Scope.view scopeCtx "ledger" scopes.ledger
+                , Html.map ctx.toMsg <| Scope.view scopeCtx "consensus" scopes.consensus
+                , Html.map ctx.toMsg <| Scope.view scopeCtx "mercenaries" scopes.mercenaries
+                , Html.map ctx.toMsg <| Scope.view scopeCtx "marketing" scopes.marketing
+                , Html.map ctx.toMsg <| Scope.view scopeCtx "contingency" contingency
                 ]
-
-
-viewPragmaScopesScriptHash : Bytes CredentialHash -> Html msg
-viewPragmaScopesScriptHash scriptHash =
-    Html.p [] [ text <| "(PRAGMA) Scopes script hash: " ++ Bytes.toHex scriptHash ]
-
-
-viewRegistriesSeedUtxo : OutputReference -> Html msg
-viewRegistriesSeedUtxo { transactionId, outputIndex } =
-    Html.p [] [ text <| "Registries Seed UTXO: " ++ Bytes.toHex transactionId ++ " #" ++ String.fromInt outputIndex ]
-
-
-viewExpirationDate : Int -> Html msg
-viewExpirationDate posixDate =
-    Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt posixDate ++ " (" ++ displayPosixDate (Time.millisToPosix posixDate) ++ ")" ]
 
 
 viewSetupTxsState : ViewContext a msg -> SetupTxsState -> Html msg
@@ -1064,11 +1034,11 @@ viewSetupTxsState ctx { txs, treasury, tracking } =
     div []
         [ Html.h2 [] [ text "Treasury State after Initialization" ]
         , viewRootUtxo treasury.rootUtxo
-        , Html.map ctx.toMsg <| viewScopeSetup "ledger" treasury.scopes.ledger
-        , Html.map ctx.toMsg <| viewScopeSetup "consensus" treasury.scopes.consensus
-        , Html.map ctx.toMsg <| viewScopeSetup "mercenaries" treasury.scopes.mercenaries
-        , Html.map ctx.toMsg <| viewScopeSetup "marketing" treasury.scopes.marketing
-        , Html.map ctx.toMsg <| viewScopeSetup "contingency" treasury.contingency
+        , Scope.viewSetup "ledger" treasury.scopes.ledger
+        , Scope.viewSetup "consensus" treasury.scopes.consensus
+        , Scope.viewSetup "mercenaries" treasury.scopes.mercenaries
+        , Scope.viewSetup "marketing" treasury.scopes.marketing
+        , Scope.viewSetup "contingency" treasury.contingency
         , Html.h2 [] [ text "Txs to submit for Treasury Initialization" ]
         , Html.h3 [] [ text "Scope Owners Definition" ]
         , viewTxStatus ctx tracking.scopes txs.scopes
@@ -1113,282 +1083,6 @@ viewTxStatus { routingConfig } txState ({ txId, tx, expectedSignatures, signerDe
         , Html.p [] [ text <| "Tx ID: " ++ Bytes.toHex txId ]
         , Html.pre [] [ text <| prettyTx tx ]
         ]
-
-
-viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
-viewLoadingRootUtxo rootUtxo =
-    case rootUtxo of
-        RemoteData.NotAsked ->
-            Html.p [] [ text "(PRAGMA) root scopes UTxO not asked yet" ]
-
-        RemoteData.Loading ->
-            Html.p [] [ text "(PRAGMA) root scopes UTxO loading ... ", spinner ]
-
-        RemoteData.Failure error ->
-            Html.p [] [ text <| "(PRAGMA) root scopes UTxO failed to load: " ++ error ]
-
-        RemoteData.Success utxo ->
-            viewRootUtxo utxo
-
-
-viewRootUtxo : ( OutputReference, Output ) -> Html msg
-viewRootUtxo ( ref, _ ) =
-    Html.p [] [ text <| "(PRAGMA) root scopes UTxO: " ++ Utxo.refAsString ref ]
-
-
-viewLoadingScope : String -> LoadingScope -> Html msg
-viewLoadingScope scopeName { owner, permissionsScriptApplied, permissionsScriptPublished, sundaeTreasuryScriptApplied, sundaeTreasuryScriptPublished, registryNftPolicyId, registryUtxo, treasuryUtxos } =
-    div [ HA.style "border" "1px solid black" ]
-        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
-        , viewMaybeOwner owner
-        , viewPermissionsScript permissionsScriptApplied
-        , viewLoadingPermissionsScriptRef permissionsScriptPublished
-        , viewLoadingTreasuryScript sundaeTreasuryScriptApplied
-        , viewLoadingTreasuryScriptRef sundaeTreasuryScriptPublished
-        , viewRegistryNftPolicyId registryNftPolicyId
-        , viewLoadingRegistryUtxo registryUtxo
-        , viewLoadingTreasuryUtxos treasuryUtxos
-        ]
-
-
-viewScopeSetup : String -> Scope -> Html Msg
-viewScopeSetup scopeName { owner, permissionsScript, sundaeTreasuryScript, registryUtxo } =
-    div [ HA.style "border" "1px solid black" ]
-        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
-        , viewOwner owner
-        , viewPermissionsScript permissionsScript
-        , viewTreasuryScript sundaeTreasuryScript
-        , viewRegistryUtxo registryUtxo
-        ]
-
-
-viewScope : NetworkId -> OutputReference -> List ( String, MultisigScript ) -> String -> Scope -> Html Msg
-viewScope networkId rootUtxo allOwners scopeName ({ owner, permissionsScript, permissionsScriptRef, sundaeTreasuryScript, sundaeTreasuryScriptRef, registryUtxo, treasuryUtxos } as scope) =
-    let
-        treasuryScriptHash =
-            Tuple.first sundaeTreasuryScript
-
-        treasuryAddress =
-            Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
-    in
-    div [ HA.style "border" "1px solid black" ]
-        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
-        , text <| "Scope address: " ++ Address.toBech32 treasuryAddress
-        , viewOwner owner
-        , viewPermissionsScript permissionsScript
-        , viewPermissionsScriptRef (Tuple.first permissionsScript) (Tuple.second permissionsScript) permissionsScriptRef
-        , viewTreasuryScript sundaeTreasuryScript
-        , viewTreasuryScriptRef (Tuple.first sundaeTreasuryScript) (Tuple.second sundaeTreasuryScript) sundaeTreasuryScriptRef
-        , viewRegistryUtxo registryUtxo
-        , viewTreasuryUtxos scopeName scope allOwners rootUtxo treasuryUtxos
-        ]
-
-
-viewMaybeOwner : Maybe MultisigScript -> Html msg
-viewMaybeOwner maybeOwner =
-    case maybeOwner of
-        Nothing ->
-            Html.p [] [ text <| "Owner: loading ... ", spinner ]
-
-        Just owner ->
-            viewOwner owner
-
-
-viewOwner : MultisigScript -> Html msg
-viewOwner owner =
-    Html.p [] [ text <| "Owner: " ++ Debug.toString owner ]
-
-
-viewLoadingPermissionsScriptRef : RemoteData String (Maybe ( OutputReference, Output )) -> Html msg
-viewLoadingPermissionsScriptRef remoteData =
-    case remoteData of
-        RemoteData.NotAsked ->
-            Html.p [] [ text <| "Permissions script ref not asked yet" ]
-
-        RemoteData.Loading ->
-            Html.p [] [ text <| "Permissions script ref loading ... ", spinner ]
-
-        RemoteData.Failure error ->
-            Html.p [] [ text <| "Permissions script ref failed to load: " ++ error ]
-
-        RemoteData.Success maybeUtxo ->
-            case maybeUtxo of
-                Just ( ref, _ ) ->
-                    Html.p [] [ text <| "Permissions script ref UTxO: " ++ Utxo.refAsString ref ]
-
-                Nothing ->
-                    Html.p [] [ text <| "Permissions script ref not published yet." ]
-
-
-viewPermissionsScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
-viewPermissionsScript ( hash, _ ) =
-    Html.p [] [ text <| "Fully applied permissions script hash: " ++ Bytes.toHex hash ]
-
-
-viewPermissionsScriptRef : Bytes CredentialHash -> PlutusScript -> Maybe ( OutputReference, Output ) -> Html Msg
-viewPermissionsScriptRef hash script maybeUtxo =
-    case maybeUtxo of
-        Just ( ref, _ ) ->
-            Html.p [] [ text <| "Permissions script ref UTxO: " ++ Utxo.refAsString ref ]
-
-        Nothing ->
-            Html.p []
-                [ text <| "Permissions script ref not published yet. "
-                , Html.button [ onClick <| PublishScript hash script ] [ text "Publish script in a ref UTxO" ]
-                ]
-
-
-viewLoadingTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) -> Html msg
-viewLoadingTreasuryScript remoteData =
-    case remoteData of
-        RemoteData.NotAsked ->
-            Html.p [] [ text <| "Sundae treasury script not asked yet" ]
-
-        RemoteData.Loading ->
-            Html.p [] [ text <| "Sundae treasury script loading ... ", spinner ]
-
-        RemoteData.Failure error ->
-            Html.p [] [ text <| "Sundae treasury script failed to load: " ++ error ]
-
-        RemoteData.Success script ->
-            viewTreasuryScript script
-
-
-viewTreasuryScript : ( Bytes CredentialHash, PlutusScript ) -> Html msg
-viewTreasuryScript ( hash, _ ) =
-    Html.p [] [ text <| "Fully applied Sundae treasury script hash: " ++ Bytes.toHex hash ]
-
-
-viewLoadingTreasuryScriptRef : RemoteData String (Maybe ( OutputReference, Output )) -> Html msg
-viewLoadingTreasuryScriptRef remoteData =
-    case remoteData of
-        RemoteData.NotAsked ->
-            Html.p [] [ text <| "Sundae treasury script ref not asked yet" ]
-
-        RemoteData.Loading ->
-            Html.p [] [ text <| "Sundae treasury script ref loading ... ", spinner ]
-
-        RemoteData.Failure error ->
-            Html.p [] [ text <| "Sundae treasury script ref failed to load: " ++ error ]
-
-        RemoteData.Success maybeUtxo ->
-            case maybeUtxo of
-                Just ( ref, _ ) ->
-                    Html.p [] [ text <| "Treasury script ref UTxO: " ++ Utxo.refAsString ref ]
-
-                Nothing ->
-                    Html.p [] [ text <| "Treasury script ref not published yet." ]
-
-
-viewTreasuryScriptRef : Bytes CredentialHash -> PlutusScript -> Maybe ( OutputReference, Output ) -> Html Msg
-viewTreasuryScriptRef hash script maybeUtxo =
-    case maybeUtxo of
-        Just ( ref, _ ) ->
-            Html.p [] [ text <| "Treasury script ref UTxO: " ++ Utxo.refAsString ref ]
-
-        Nothing ->
-            Html.p []
-                [ text <| "Treasury script ref not published yet. "
-                , Html.button [ onClick <| PublishScript hash script ] [ text "Publish script in a ref UTxO" ]
-                ]
-
-
-viewRegistryNftPolicyId : Bytes PolicyId -> Html msg
-viewRegistryNftPolicyId policyId =
-    Html.p [] [ text <| "Registry trap policy ID: " ++ Bytes.toHex policyId ]
-
-
-viewLoadingRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
-viewLoadingRegistryUtxo registryUtxo =
-    case registryUtxo of
-        RemoteData.NotAsked ->
-            Html.p [] [ text <| "Registry UTxO not asked yet" ]
-
-        RemoteData.Loading ->
-            Html.p [] [ text <| "Registry UTxO loading ... ", spinner ]
-
-        RemoteData.Failure error ->
-            Html.p [] [ text <| "Registry UTxO failed to load: " ++ error ]
-
-        RemoteData.Success utxo ->
-            viewRegistryUtxo utxo
-
-
-viewRegistryUtxo : ( OutputReference, Output ) -> Html msg
-viewRegistryUtxo ( ref, _ ) =
-    Html.p [] [ text <| "Registry UTxO: " ++ Utxo.refAsString ref ]
-
-
-viewLoadingTreasuryUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
-viewLoadingTreasuryUtxos loadingUtxos =
-    case loadingUtxos of
-        RemoteData.NotAsked ->
-            Html.p [] [ text <| "Treasury UTxOs not asked yet" ]
-
-        RemoteData.Loading ->
-            Html.p [] [ text <| "Treasury UTxOs loading ... ", spinner ]
-
-        RemoteData.Failure error ->
-            Html.p [] [ text <| "Treasury UTxOs failed to load: " ++ error ]
-
-        RemoteData.Success utxos ->
-            Html.p [] [ text <| "Treasury UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]
-
-
-viewTreasuryUtxos : String -> Scope -> List ( String, MultisigScript ) -> OutputReference -> Utxo.RefDict Output -> Html Msg
-viewTreasuryUtxos scopeName scope allOwners rootUtxo utxos =
-    let
-        refreshUtxosButton =
-            Html.button [ onClick RefreshTreasuryUtxos ] [ text "Refresh UTxOs" ]
-
-        utxosCount =
-            Dict.Any.size utxos
-
-        mergeButton =
-            if utxosCount > 1 then
-                Html.button [ onClick (TreasuryMergingMsg <| StartMergeUtxos scopeName scope rootUtxo) ] [ text "Merge UTxOs" ]
-
-            else
-                text ""
-
-        startDisburseInfo : ( OutputReference, Output ) -> StartDisburseInfo
-        startDisburseInfo utxo =
-            { scopeName = scopeName
-            , scope = scope
-            , allOwners = allOwners
-            , rootUtxo = rootUtxo
-            , spendingUtxo = utxo
-            }
-
-        disburseButton utxo =
-            Html.button [ onClick (TreasuryDisburseMsg <| StartDisburse <| startDisburseInfo utxo) ] [ text "Disburse" ]
-
-        viewDetailedUtxoItem utxo =
-            Html.li []
-                (viewDetailedUtxo utxo ++ [ disburseButton utxo ])
-    in
-    div []
-        [ Html.p [] [ text <| "Treasury UTxOs count: " ++ String.fromInt (Dict.Any.size utxos) ]
-        , Html.p [] [ text <| "TODO: add buttons for possible actions with those UTxOs" ]
-        , refreshUtxosButton
-        , mergeButton
-        , Html.ul [] <|
-            List.map viewDetailedUtxoItem (Dict.Any.toList utxos)
-        ]
-
-
-viewDetailedUtxo : ( OutputReference, Output ) -> List (Html msg)
-viewDetailedUtxo ( ref, output ) =
-    [ div [] [ text <| "UTxO: " ++ Utxo.refAsString ref ]
-    , div [] [ text <| "Address: " ++ Address.toBech32 output.address ]
-    , div [] [ text <| "Value: (₳ amounts are in Lovelaces)" ]
-    , Html.pre [] [ text <| String.join "\n" <| Value.toMultilineString output.amount ]
-    ]
-
-
-spinner : Html msg
-spinner =
-    Html.span [ HA.class "loader" ] []
 
 
 
@@ -1440,7 +1134,7 @@ viewMergeUtxosAction { toMsg, routingConfig, connectedWallet } mergeState =
                         , tx = tx
                         , expectedSignatures = expectedSignatures
 
-                        -- signerDescriptions : BytesMap CredentialHash String
+                        -- TODO: signerDescriptions : BytesMap CredentialHash String
                         , signerDescriptions = Bytes.Map.empty
                         }
                 in

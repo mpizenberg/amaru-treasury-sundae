@@ -11,6 +11,8 @@ import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference)
 import ConcurrentTask exposing (ConcurrentTask)
 import Dict.Any
+import Html exposing (Html, div, text)
+import Html.Attributes as HA
 import Json.Decode as JD
 import MultisigScript exposing (MultisigScript)
 import Natural as N
@@ -19,10 +21,11 @@ import Result.Extra
 import Storage
 import Time exposing (Posix)
 import Treasury
-import TreasuryManagement.LoadingParams as LoadingParams exposing (LoadingParams)
-import TreasuryManagement.Scope exposing (Scope)
+import TreasuryManagement.LoadingParams as LoadingParams exposing (LoadingParams, viewPragmaScopesScriptHash, viewRegistriesSeedUtxo)
+import TreasuryManagement.Scope exposing (Scope, Scripts, viewOwner, viewPermissionsScript, viewRegistryUtxo, viewTreasuryScript)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import Types
+import Utils exposing (spinner)
 
 
 type alias LoadingTreasury =
@@ -51,14 +54,6 @@ type alias LoadedTreasury =
     , loadingParams : LoadingParams
     , scopes : Scopes Scope
     , contingency : Scope
-    }
-
-
-type alias Scripts =
-    { sundaeTreasury : PlutusScript
-    , registryTrap : PlutusScript
-    , scopesTrap : PlutusScript
-    , scopePermissions : PlutusScript
     }
 
 
@@ -697,3 +692,164 @@ doublecheckTreasuryScriptHash { sundaeTreasuryScript, registryUtxo } =
                 else
                     Err <| "Treasury script hash mismatch between the one in the onchain registry UTxO, and the one re-computed from the treasury script blueprint. Make sure you are compiling the aiken contracts with the correct debug options."
             )
+
+
+
+-- VIEW ##############################################################
+
+
+viewLoading : LoadingTreasury -> Html msg
+viewLoading { rootUtxo, loadingParams, scopes, contingency } =
+    div []
+        [ Html.p [] [ text "Loading treasury ... ", spinner ]
+        , viewLoadingRootUtxo rootUtxo
+        , viewPragmaScopesScriptHash loadingParams.pragmaScriptHash
+        , viewRegistriesSeedUtxo loadingParams.registriesSeedUtxo
+        , Utils.viewExpirationDate <| Time.posixToMillis loadingParams.expiration
+        , viewLoadingScope "ledger" scopes.ledger
+        , viewLoadingScope "consensus" scopes.consensus
+        , viewLoadingScope "mercenaries" scopes.mercenaries
+        , viewLoadingScope "marketing" scopes.marketing
+        , viewLoadingScope "contingency" contingency
+        ]
+
+
+viewLoadingRootUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
+viewLoadingRootUtxo rootUtxo =
+    case rootUtxo of
+        RemoteData.NotAsked ->
+            Html.p [] [ text "(PRAGMA) root scopes UTxO not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text "(PRAGMA) root scopes UTxO loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "(PRAGMA) root scopes UTxO failed to load: " ++ error ]
+
+        RemoteData.Success utxo ->
+            viewRootUtxo utxo
+
+
+viewRootUtxo : ( OutputReference, Output ) -> Html msg
+viewRootUtxo ( ref, _ ) =
+    Html.p [] [ text <| "(PRAGMA) root scopes UTxO: " ++ Utxo.refAsString ref ]
+
+
+viewLoadingScope : String -> LoadingScope -> Html msg
+viewLoadingScope scopeName { owner, permissionsScriptApplied, permissionsScriptPublished, sundaeTreasuryScriptApplied, sundaeTreasuryScriptPublished, registryNftPolicyId, registryUtxo, treasuryUtxos } =
+    div [ HA.style "border" "1px solid black" ]
+        [ Html.h4 [] [ text <| "Scope: " ++ scopeName ]
+        , viewMaybeOwner owner
+        , viewPermissionsScript permissionsScriptApplied
+        , viewLoadingPermissionsScriptRef permissionsScriptPublished
+        , viewLoadingTreasuryScript sundaeTreasuryScriptApplied
+        , viewLoadingTreasuryScriptRef sundaeTreasuryScriptPublished
+        , viewRegistryNftPolicyId registryNftPolicyId
+        , viewLoadingRegistryUtxo registryUtxo
+        , viewLoadingTreasuryUtxos treasuryUtxos
+        ]
+
+
+viewMaybeOwner : Maybe MultisigScript -> Html msg
+viewMaybeOwner maybeOwner =
+    case maybeOwner of
+        Nothing ->
+            Html.p [] [ text <| "Owner: loading ... ", spinner ]
+
+        Just owner ->
+            viewOwner owner
+
+
+viewLoadingPermissionsScriptRef : RemoteData String (Maybe ( OutputReference, Output )) -> Html msg
+viewLoadingPermissionsScriptRef remoteData =
+    case remoteData of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Permissions script ref not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Permissions script ref loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Permissions script ref failed to load: " ++ error ]
+
+        RemoteData.Success maybeUtxo ->
+            case maybeUtxo of
+                Just ( ref, _ ) ->
+                    Html.p [] [ text <| "Permissions script ref UTxO: " ++ Utxo.refAsString ref ]
+
+                Nothing ->
+                    Html.p [] [ text <| "Permissions script ref not published yet." ]
+
+
+viewLoadingTreasuryScript : RemoteData String ( Bytes CredentialHash, PlutusScript ) -> Html msg
+viewLoadingTreasuryScript remoteData =
+    case remoteData of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Sundae treasury script not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Sundae treasury script loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Sundae treasury script failed to load: " ++ error ]
+
+        RemoteData.Success script ->
+            viewTreasuryScript script
+
+
+viewLoadingTreasuryScriptRef : RemoteData String (Maybe ( OutputReference, Output )) -> Html msg
+viewLoadingTreasuryScriptRef remoteData =
+    case remoteData of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Sundae treasury script ref not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Sundae treasury script ref loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Sundae treasury script ref failed to load: " ++ error ]
+
+        RemoteData.Success maybeUtxo ->
+            case maybeUtxo of
+                Just ( ref, _ ) ->
+                    Html.p [] [ text <| "Treasury script ref UTxO: " ++ Utxo.refAsString ref ]
+
+                Nothing ->
+                    Html.p [] [ text <| "Treasury script ref not published yet." ]
+
+
+viewRegistryNftPolicyId : Bytes PolicyId -> Html msg
+viewRegistryNftPolicyId policyId =
+    Html.p [] [ text <| "Registry trap policy ID: " ++ Bytes.toHex policyId ]
+
+
+viewLoadingRegistryUtxo : RemoteData String ( OutputReference, Output ) -> Html msg
+viewLoadingRegistryUtxo registryUtxo =
+    case registryUtxo of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Registry UTxO not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Registry UTxO loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Registry UTxO failed to load: " ++ error ]
+
+        RemoteData.Success utxo ->
+            viewRegistryUtxo utxo
+
+
+viewLoadingTreasuryUtxos : RemoteData String (Utxo.RefDict Output) -> Html msg
+viewLoadingTreasuryUtxos loadingUtxos =
+    case loadingUtxos of
+        RemoteData.NotAsked ->
+            Html.p [] [ text <| "Treasury UTxOs not asked yet" ]
+
+        RemoteData.Loading ->
+            Html.p [] [ text <| "Treasury UTxOs loading ... ", spinner ]
+
+        RemoteData.Failure error ->
+            Html.p [] [ text <| "Treasury UTxOs failed to load: " ++ error ]
+
+        RemoteData.Success utxos ->
+            Html.p [] [ text <| "Treasury UTxOs loaded. UTxO count = " ++ String.fromInt (Dict.Any.size utxos) ]

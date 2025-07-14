@@ -9,7 +9,7 @@ import Html.Events as HE
 import Json.Decode as JD
 import Json.Encode as JE
 import Time exposing (Posix)
-import Utils exposing (displayPosixDate)
+import Utils exposing (displayPosixDate, viewExpirationDate)
 
 
 type alias Form =
@@ -196,8 +196,3 @@ viewPragmaScopesScriptHash scriptHash =
 viewRegistriesSeedUtxo : OutputReference -> Html msg
 viewRegistriesSeedUtxo { transactionId, outputIndex } =
     Html.p [] [ text <| "Registries Seed UTXO: " ++ Bytes.toHex transactionId ++ " #" ++ String.fromInt outputIndex ]
-
-
-viewExpirationDate : Int -> Html msg
-viewExpirationDate posixDate =
-    Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt posixDate ++ " (" ++ displayPosixDate (Time.millisToPosix posixDate) ++ ")" ]

@@ -29,6 +29,7 @@ import Storage
 import TreasuryManagement exposing (ActionStatus(..), TreasuryAction(..), TreasuryManagement(..), TxState(..))
 import TreasuryManagement.Loading
 import TreasuryManagement.LoadingParams as LoadingParams
+import TreasuryManagement.Scope exposing (Scripts)
 
 
 type alias Flags =
@@ -127,7 +128,7 @@ type alias Model =
     }
 
 
-initialModel : JD.Value -> TreasuryManagement.Loading.Scripts -> Int -> Model
+initialModel : JD.Value -> Scripts -> Int -> Model
 initialModel db scripts posixTimeMs =
     let
         treasuryLoadingParams =

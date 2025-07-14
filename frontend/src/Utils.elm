@@ -15,6 +15,11 @@ viewError maybeErrors =
             Html.pre [ HA.style "color" "red" ] [ text errors ]
 
 
+viewExpirationDate : Int -> Html msg
+viewExpirationDate posixDate =
+    Html.p [] [ text <| "Expiration date (Posix): " ++ String.fromInt posixDate ++ " (" ++ displayPosixDate (Time.millisToPosix posixDate) ++ ")" ]
+
+
 displayPosixDate : Posix -> String
 displayPosixDate posix =
     let
@@ -41,3 +46,8 @@ displayPosixDate posix =
                 |> String.padLeft 2 '0'
     in
     "UTC: " ++ year ++ " / " ++ month ++ " / " ++ day ++ " - " ++ hour ++ ":" ++ minutes
+
+
+spinner : Html msg
+spinner =
+    Html.span [ HA.class "loader" ] []

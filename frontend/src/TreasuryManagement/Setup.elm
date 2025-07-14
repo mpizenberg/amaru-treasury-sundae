@@ -20,9 +20,9 @@ import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
 import Time exposing (Posix)
 import Treasury
-import TreasuryManagement.Loading exposing (LoadedTreasury, Scripts)
+import TreasuryManagement.Loading exposing (LoadedTreasury)
 import TreasuryManagement.LoadingParams exposing (LoadingParams)
-import TreasuryManagement.Scope as Scope exposing (Scope)
+import TreasuryManagement.Scope as Scope exposing (Scope, Scripts)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import Types
 
