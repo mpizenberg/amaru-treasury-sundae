@@ -365,7 +365,7 @@ updateWithCompletedTask ctx scripts taskCompleted ({ scopes, contingency } as lo
 
                         -- The list order is the same as the order of the scopes
                         loadingScopes =
-                            Scopes.toList scopes ++ [ contingency ]
+                            Scopes.toList updatedLoadingTreasury.scopes ++ [ updatedLoadingTreasury.contingency ]
 
                         extractAppliedTreasuryScriptHash { sundaeTreasuryScriptApplied } =
                             RemoteData.map (\( hash, _ ) -> hash) sundaeTreasuryScriptApplied
