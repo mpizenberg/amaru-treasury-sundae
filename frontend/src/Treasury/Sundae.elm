@@ -1,4 +1,4 @@
-module Sundae exposing (..)
+module Treasury.Sundae exposing (..)
 
 import Bytes.Comparable exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId, StakeAddress)
@@ -12,7 +12,7 @@ import Cardano.Value as Value exposing (Value)
 import Cardano.Witness as Witness
 import Cbor.Encode as CE
 import Natural exposing (Natural)
-import Types exposing (TreasuryConfiguration, TreasurySpendRedeemer(..), treasuryConfigToData, treasurySpendRedeemerToData)
+import Treasury.SundaeTypes as SundaeTypes exposing (TreasuryConfiguration, TreasurySpendRedeemer(..), treasuryConfigToData, treasurySpendRedeemerToData)
 
 
 {-| Apply config parameters to the unapplied script to get the final Plutus script.
@@ -153,7 +153,7 @@ reorganize { scriptWitnessSource, registryOutputRef, additionalOutputRefs, requi
                 |> List.map
                     (\( spentInputRef, spentOutput ) ->
                         spend (SpendConfig scriptWitnessSource registryOutputRef requiredSigners requiredWithdrawals spentInputRef spentOutput validityRange)
-                            Types.Reorganize
+                            SundaeTypes.Reorganize
                             (\_ -> [])
                             spentOutput.amount
                     )

@@ -1,4 +1,4 @@
-module TreasuryManagement.Setup exposing (..)
+module Treasury.Setup exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
@@ -18,13 +18,13 @@ import Integer as I
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
-import Sundae
 import Time exposing (Posix)
-import TreasuryManagement.Loading exposing (LoadedTreasury)
-import TreasuryManagement.LoadingParams exposing (LoadingParams)
-import TreasuryManagement.Scope as Scope exposing (Scope, Scripts)
-import TreasuryManagement.Scopes as Scopes exposing (Scopes)
-import Types
+import Treasury.Loading exposing (LoadedTreasury)
+import Treasury.LoadingParams exposing (LoadingParams)
+import Treasury.Scope as Scope exposing (Scope, Scripts)
+import Treasury.Scopes as Scopes exposing (Scopes)
+import Treasury.Sundae
+import Treasury.SundaeTypes as SundaeTypes
 
 
 type alias LastStepParams =
@@ -128,7 +128,7 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
                     Value.onlyLovelace <| N.fromSafeInt 2000000
 
                 registryDatum treasuryHash =
-                    Types.registryToData
+                    SundaeTypes.registryToData
                         { treasury = Address.ScriptHash treasuryHash
                         , vendor = Address.ScriptHash <| Bytes.dummy 28 ""
                         }
@@ -145,7 +145,7 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
                     -- Mint the registry token
                     , TxIntent.MintBurn
                         { policyId = registryHash
-                        , assets = Bytes.Map.singleton Types.registryTokenName I.one
+                        , assets = Bytes.Map.singleton SundaeTypes.registryTokenName I.one
                         , scriptWitness =
                             Witness.Plutus
                                 { script = ( Script.plutusVersion registryScript, Witness.ByValue <| Script.cborWrappedBytes registryScript )
@@ -157,7 +157,7 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
                     -- Send 2 ada + policyId/assetName + scopesDatum to the scopes trap address
                     , TxIntent.SendToOutput <|
                         { address = Address.script networkId registryHash
-                        , amount = Value.add twoAda <| Value.onlyToken registryHash Types.registryTokenName N.one
+                        , amount = Value.add twoAda <| Value.onlyToken registryHash SundaeTypes.registryTokenName N.one
                         , datumOption = Just <| Utxo.datumValueFromData <| registryDatum treasuryHash
                         , referenceScript = Nothing
                         }
@@ -415,7 +415,7 @@ setupTreasury expiration registryScriptHash permissionsScriptHash sundaeTreasury
         multisig =
             MultisigScript.Script permissionsScriptHash
 
-        treasuryConfig : Types.TreasuryConfiguration
+        treasuryConfig : SundaeTypes.TreasuryConfiguration
         treasuryConfig =
             { registryToken = registryScriptHash
             , permissions =
@@ -428,7 +428,7 @@ setupTreasury expiration registryScriptHash permissionsScriptHash sundaeTreasury
             , payoutUpperbound = N.zero
             }
     in
-    Sundae.initializeScript treasuryConfig sundaeTreasuryScript
+    Treasury.Sundae.initializeScript treasuryConfig sundaeTreasuryScript
 
 
 pickSeedUtxo : Utxo.RefDict Output -> Address -> Natural -> Result String ( OutputReference, Output )

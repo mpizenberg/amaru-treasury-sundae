@@ -1,4 +1,4 @@
-module TreasuryManagement.Loading exposing (..)
+module Treasury.Loading exposing (..)
 
 import Api
 import Bytes.Comparable as Bytes exposing (Bytes)
@@ -19,12 +19,12 @@ import Natural as N
 import RemoteData exposing (RemoteData)
 import Result.Extra
 import Storage
-import Sundae
 import Time exposing (Posix)
-import TreasuryManagement.LoadingParams as LoadingParams exposing (LoadingParams, viewPragmaScopesScriptHash, viewRegistriesSeedUtxo)
-import TreasuryManagement.Scope exposing (Scope, Scripts, viewOwner, viewPermissionsScript, viewRegistryUtxo, viewTreasuryScript)
-import TreasuryManagement.Scopes as Scopes exposing (Scopes)
-import Types
+import Treasury.LoadingParams as LoadingParams exposing (LoadingParams, viewPragmaScopesScriptHash, viewRegistriesSeedUtxo)
+import Treasury.Scope exposing (Scope, Scripts, viewOwner, viewPermissionsScript, viewRegistryUtxo, viewTreasuryScript)
+import Treasury.Scopes as Scopes exposing (Scopes)
+import Treasury.Sundae
+import Treasury.SundaeTypes as SundaeTypes
 import Utils exposing (spinner)
 
 
@@ -146,7 +146,7 @@ startTreasuryLoading ctx scripts form =
         loadRegistryUtxosTask loadingScopes contingencyScope =
             let
                 registryAssetName =
-                    Types.registryTokenName
+                    SundaeTypes.registryTokenName
 
                 registryAssets =
                     Scopes
@@ -549,7 +549,7 @@ applySundaeTreasuryScript unappliedScript scope =
         multisig =
             MultisigScript.Script (Tuple.first scope.permissionsScriptApplied)
 
-        treasuryConfig : Types.TreasuryConfiguration
+        treasuryConfig : SundaeTypes.TreasuryConfiguration
         treasuryConfig =
             { registryToken = scope.registryNftPolicyId
             , permissions =
@@ -562,7 +562,7 @@ applySundaeTreasuryScript unappliedScript scope =
             , payoutUpperbound = N.zero
             }
     in
-    Sundae.initializeScript treasuryConfig unappliedScript
+    Treasury.Sundae.initializeScript treasuryConfig unappliedScript
         |> Result.Extra.unpack RemoteData.Failure
             (\applied -> RemoteData.Success ( Script.hash <| Script.Plutus applied, applied ))
 
@@ -680,7 +680,7 @@ doublecheckTreasuryScriptHash { sundaeTreasuryScript, registryUtxo } =
 
                 Just (DatumValue { rawBytes }) ->
                     Data.fromBytes rawBytes
-                        |> Maybe.andThen Types.registryFromData
+                        |> Maybe.andThen SundaeTypes.registryFromData
                         |> Result.fromMaybe ("The registry UTxO datum does not contain a valid registry. UTxO ref: " ++ Utxo.refAsString registryRef)
     in
     treasuryHashDecodedFromRegistry

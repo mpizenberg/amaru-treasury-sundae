@@ -1,4 +1,4 @@
-module TreasuryManagement.SetupForm exposing (..)
+module Treasury.SetupForm exposing (..)
 
 import Bytes.Comparable as Bytes
 import Html exposing (Html, div, text)
@@ -6,7 +6,7 @@ import Html.Attributes as HA
 import Html.Events as HE exposing (onClick)
 import MultisigScript exposing (MultisigScript)
 import Time exposing (Posix)
-import TreasuryManagement.Scopes as Scopes exposing (Scopes)
+import Treasury.Scopes as Scopes exposing (Scopes)
 import Utils exposing (displayPosixDate, viewError)
 
 

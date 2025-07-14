@@ -1,4 +1,4 @@
-module TreasuryManagement.Merge exposing (..)
+module Treasury.Merge exposing (..)
 
 import Bytes.Comparable exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
@@ -12,9 +12,9 @@ import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Witness as Witness
 import Dict.Any
 import Natural as N exposing (Natural)
-import Sundae
 import Time exposing (Posix)
-import TreasuryManagement.Scope exposing (Scope)
+import Treasury.Scope exposing (Scope)
+import Treasury.Sundae
 
 
 type alias BuildContext a =
@@ -121,7 +121,7 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
         scopeTreasuryAddress =
             Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
     in
-    Sundae.reorganize
+    Treasury.Sundae.reorganize
         { scriptWitnessSource = treasuryWitnessSource
         , registryOutputRef = Tuple.first scope.registryUtxo
         , additionalOutputRefs = [ rootUtxo ]

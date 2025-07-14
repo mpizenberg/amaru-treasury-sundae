@@ -1,4 +1,4 @@
-module TreasuryManagement.Scope exposing (..)
+module Treasury.Scope exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (CredentialHash, NetworkId)
@@ -13,7 +13,7 @@ import Html.Attributes as HA
 import Html.Events exposing (onClick)
 import List.Extra
 import MultisigScript exposing (MultisigScript)
-import Types
+import Treasury.SundaeTypes as SundaeTypes
 
 
 type alias Scope =
@@ -44,7 +44,7 @@ setup txId registryTx scopeOwner registryScriptHash permissions treasury =
             let
                 maybeOutputIndex =
                     registryTx.body.outputs
-                        |> List.Extra.findIndex (\{ amount } -> MultiAsset.get registryScriptHash Types.registryTokenName amount.assets /= Nothing)
+                        |> List.Extra.findIndex (\{ amount } -> MultiAsset.get registryScriptHash SundaeTypes.registryTokenName amount.assets /= Nothing)
             in
             case maybeOutputIndex of
                 Nothing ->

@@ -1,4 +1,4 @@
-module TreasuryManagement exposing (..)
+module Treasury.Management exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
@@ -23,14 +23,14 @@ import Platform.Cmd as Cmd
 import Route
 import Task
 import Time exposing (Posix)
-import TreasuryManagement.Disburse as Disburse
-import TreasuryManagement.Loading as Loading exposing (LoadedTreasury, LoadingTreasury, TaskCompleted, viewRootUtxo)
-import TreasuryManagement.LoadingParams as LoadingParams
-import TreasuryManagement.Merge as Merge
-import TreasuryManagement.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
-import TreasuryManagement.Scopes as Scopes
-import TreasuryManagement.Setup exposing (SetupTxs)
-import TreasuryManagement.SetupForm as SetupForm exposing (SetupForm)
+import Treasury.Disburse as Disburse
+import Treasury.Loading as Loading exposing (LoadedTreasury, LoadingTreasury, TaskCompleted, viewRootUtxo)
+import Treasury.LoadingParams as LoadingParams
+import Treasury.Merge as Merge
+import Treasury.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
+import Treasury.Scopes as Scopes
+import Treasury.Setup exposing (SetupTxs)
+import Treasury.SetupForm as SetupForm exposing (SetupForm)
 import Utils exposing (spinner, viewError)
 
 
@@ -251,7 +251,7 @@ handleBuildSetupTxs ctx scripts form =
                     TreasurySetupForm { form | validation = Just <| Err "Please connect wallet first" }
 
                 Just wallet ->
-                    case TreasuryManagement.Setup.setupAmaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
+                    case Treasury.Setup.setupAmaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
                         Err error ->
                             TreasurySetupForm { form | validation = Just <| Err error }
 

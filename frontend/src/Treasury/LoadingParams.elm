@@ -1,4 +1,4 @@
-module TreasuryManagement.LoadingParams exposing (..)
+module Treasury.LoadingParams exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (CredentialHash)

@@ -1,4 +1,4 @@
-module Types exposing (..)
+module Treasury.SundaeTypes exposing (..)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Credential)

@@ -26,10 +26,10 @@ import Platform.Cmd as Cmd
 import Result.Extra
 import Route exposing (Route)
 import Storage
-import TreasuryManagement exposing (ActionStatus(..), TreasuryAction(..), TreasuryManagement(..), TxState(..))
-import TreasuryManagement.Loading
-import TreasuryManagement.LoadingParams as LoadingParams
-import TreasuryManagement.Scope exposing (Scripts)
+import Treasury.Loading
+import Treasury.LoadingParams as LoadingParams
+import Treasury.Management exposing (ActionStatus(..), TreasuryAction(..), TreasuryManagement(..), TxState(..))
+import Treasury.Scope exposing (Scripts)
 
 
 type alias Flags =
@@ -93,7 +93,7 @@ type Msg
       -- Signature page
     | SignTxMsg SignTx.Msg
       -- Treasury management
-    | TreasuryManagementMsg TreasuryManagement.Msg
+    | TreasuryManagementMsg Treasury.Management.Msg
       -- Task port
     | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
     | OnTaskComplete (ConcurrentTask.Response String TaskCompleted)
@@ -102,7 +102,7 @@ type Msg
 type TaskCompleted
     = ReadLoadingParams (Maybe LoadingParams.Form)
     | LoadingParamsSaved
-    | TreasuryLoadingTask TreasuryManagement.Loading.TaskCompleted
+    | TreasuryLoadingTask Treasury.Loading.TaskCompleted
 
 
 
@@ -119,11 +119,7 @@ type alias Model =
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
-
-    -- Treasury Management
-    , treasuryManagementModel : TreasuryManagement.Model
-
-    -- Errors
+    , treasuryManagementModel : Treasury.Management.Model
     , error : Maybe String
     }
 
@@ -147,7 +143,7 @@ initialModel db scripts posixTimeMs =
     , discoveredWallets = []
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
-    , treasuryManagementModel = TreasuryManagement.init scripts treasuryLoadingParams
+    , treasuryManagementModel = Treasury.Management.init scripts treasuryLoadingParams
     , error = Nothing
     }
 
@@ -254,7 +250,7 @@ type alias ScriptBlueprint =
 -- UPDATE ############################################################
 
 
-updateCtx : (TreasuryManagement.Msg -> Msg) -> Model -> TreasuryManagement.UpdateContext {} Msg
+updateCtx : (Treasury.Management.Msg -> Msg) -> Model -> Treasury.Management.UpdateContext {} Msg
 updateCtx toMsg model =
     let
         routingConfig =
@@ -325,7 +321,7 @@ update msg model =
         TreasuryManagementMsg pageMsg ->
             let
                 ( pageModel, pageCmd, { updatedLocalState, runTasks } ) =
-                    TreasuryManagement.update (updateCtx TreasuryManagementMsg model) pageMsg model.treasuryManagementModel
+                    Treasury.Management.update (updateCtx TreasuryManagementMsg model) pageMsg model.treasuryManagementModel
 
                 ( updatedTaskPool, tasksCmds ) =
                     ConcurrentTask.Extra.attemptEach
@@ -454,7 +450,7 @@ handleWalletMsg value model =
                 SignTxPage pageModel ->
                     let
                         ( updatedTreasuryManagementModel, { updatedLocalState } ) =
-                            TreasuryManagement.updateWithTx model.localStateUtxos (SignTx.getTxInfo pageModel) model.treasuryManagementModel
+                            Treasury.Management.updateWithTx model.localStateUtxos (SignTx.getTxInfo pageModel) model.treasuryManagementModel
                     in
                     ( { model
                         | page = SignTxPage <| SignTx.recordSubmittedTx txId pageModel
@@ -561,7 +557,7 @@ handleCompletedTask model taskCompleted =
     in
     case taskCompleted of
         ReadLoadingParams (Just paramsForm) ->
-            ( { model | treasuryManagementModel = TreasuryManagement.setLoadingParamsForm paramsForm model.treasuryManagementModel }, Cmd.none )
+            ( { model | treasuryManagementModel = Treasury.Management.setLoadingParamsForm paramsForm model.treasuryManagementModel }, Cmd.none )
 
         ReadLoadingParams Nothing ->
             ( model, Cmd.none )
@@ -572,7 +568,7 @@ handleCompletedTask model taskCompleted =
         TreasuryLoadingTask subTask ->
             let
                 ( subModel, { updatedLocalState, runTasks } ) =
-                    TreasuryManagement.handleCompletedLoadingTask ctx subTask model.treasuryManagementModel
+                    Treasury.Management.handleCompletedLoadingTask ctx subTask model.treasuryManagementModel
 
                 ( updatedTaskPool, tasksCmds ) =
                     ConcurrentTask.Extra.attemptEach
@@ -626,7 +622,7 @@ viewHome model =
         [ viewError model.error
         , viewWalletSection model
         , viewLocalStateUtxosSection model.localStateUtxos
-        , TreasuryManagement.view treasuryViewContext model.treasuryManagementModel
+        , Treasury.Management.view treasuryViewContext model.treasuryManagementModel
         ]
 
 

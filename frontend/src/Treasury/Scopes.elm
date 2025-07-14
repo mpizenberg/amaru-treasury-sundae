@@ -1,4 +1,4 @@
-module TreasuryManagement.Scopes exposing (..)
+module Treasury.Scopes exposing (..)
 
 
 type alias Scopes a =
