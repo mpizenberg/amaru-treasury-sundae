@@ -12,24 +12,24 @@ import Cardano.TxExamples exposing (prettyTx)
 import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalized, TxIntent, TxOtherInfo)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference, TransactionId)
-import Cardano.Value as Value exposing (Value)
+import Cardano.Value as Value
 import Cardano.Witness as Witness
 import Cmd.Extra
 import ConcurrentTask exposing (ConcurrentTask)
 import Dict.Any
 import Html exposing (Html, div, text)
-import Html.Attributes as HA
-import Html.Events as HE exposing (onClick)
+import Html.Events exposing (onClick)
 import Json.Decode as JD
 import List.Extra
-import MultisigScript exposing (MultisigScript)
+import MultisigScript
 import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
 import Platform.Cmd as Cmd
 import Route
 import Task
 import Time exposing (Posix)
-import Treasury exposing (SpendConfig)
+import Treasury
+import TreasuryManagement.Disburse as Disburse
 import TreasuryManagement.Loading as Loading exposing (LoadedTreasury, LoadingTreasury, TaskCompleted, viewRootUtxo)
 import TreasuryManagement.LoadingParams as LoadingParams
 import TreasuryManagement.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
@@ -103,7 +103,7 @@ type TxState
 type TreasuryAction
     = NoTreasuryAction
     | MergeTreasuryUtxos ScopeActionState
-    | Disburse ScopeActionState DisburseForm
+    | Disburse ScopeActionState Disburse.Form
 
 
 type alias ScopeActionState =
@@ -118,14 +118,6 @@ type ActionStatus
     = ActionIdle
     | BuildingFailure String
     | AwaitingSignature (Bytes TransactionId) TxFinalized
-
-
-type alias DisburseForm =
-    { selectedUtxo : ( OutputReference, Output )
-    , selectedScopeOwners : List ( String, MultisigScript, Bool )
-    , recipients : List { address : String, value : Natural }
-    , error : Maybe String
-    }
 
 
 {-| Merge all UTxOs from a given scope.
@@ -208,6 +200,7 @@ type Msg
     | RefreshTreasuryUtxos
     | TreasuryMergingMsg TreasuryMergingMsg
     | TreasuryDisburseMsg TreasuryDisburseMsg
+      -- Publish
     | PublishScript (Bytes CredentialHash) PlutusScript
 
 
@@ -220,11 +213,7 @@ type TreasuryMergingMsg
 
 type TreasuryDisburseMsg
     = StartDisburse StartDisburseInfo
-    | CheckOwner String Bool
-    | AddRecipient
-    | RemoveRecipient Int
-    | SetRecipientAddress Int String
-    | SetRecipientValue Int String
+    | DisburseFormMsg Disburse.Msg
     | BuildDisburseTransaction
     | BuildDisburseTransactionWithTime Posix
     | CancelDisburseAction
@@ -307,6 +296,7 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
 
         TreasuryDisburseMsg submsg ->
             handleTreasuryDisburseMsg ctx submsg model
+                |> (\updated -> ( Tuple.first updated, Tuple.second updated, noOutMsg ))
 
         PublishScript hash script ->
             createPublishScriptTx ctx hash script model
@@ -447,52 +437,46 @@ handleBuildMergeTransaction ctx model requiredSigners currentTime =
 --
 
 
-handleTreasuryDisburseMsg : UpdateContext a msg -> TreasuryDisburseMsg -> Model -> ( Model, Cmd msg, OutMsg )
+handleTreasuryDisburseMsg : UpdateContext a msg -> TreasuryDisburseMsg -> Model -> ( Model, Cmd msg )
 handleTreasuryDisburseMsg ctx msg model =
-    let
-        noOutMsg =
-            OutMsg ctx.localStateUtxos []
-    in
     case msg of
         StartDisburse startDisburseInfo ->
-            ( handleStartDisburse startDisburseInfo model, Cmd.none, noOutMsg )
+            ( handleStartDisburse startDisburseInfo model, Cmd.none )
 
-        CheckOwner scopeOwnerName isChecked ->
-            ( handleDisburseFormUpdate (handleCheckOwner scopeOwnerName isChecked) model, Cmd.none, noOutMsg )
-
-        AddRecipient ->
-            ( handleDisburseFormUpdate addRecipient model, Cmd.none, noOutMsg )
-
-        RemoveRecipient index ->
-            ( handleDisburseFormUpdate (removeRecipient index) model, Cmd.none, noOutMsg )
-
-        SetRecipientAddress index address ->
-            ( handleDisburseFormUpdate (setRecipientAddress index address) model, Cmd.none, noOutMsg )
-
-        SetRecipientValue index value ->
-            ( handleDisburseFormUpdate (setRecipientValue index value) model, Cmd.none, noOutMsg )
+        DisburseFormMsg subMsg ->
+            ( handleDisburseFormUpdate (Disburse.update subMsg) model, Cmd.none )
 
         BuildDisburseTransaction ->
             ( model
             , Task.perform (ctx.toMsg << TreasuryDisburseMsg << BuildDisburseTransactionWithTime) Time.now
-            , noOutMsg
             )
 
         BuildDisburseTransactionWithTime currentTime ->
             case ctx.connectedWallet of
                 Nothing ->
-                    ( { model | error = Just "Please connect your wallet" }, Cmd.none, noOutMsg )
+                    ( { model | error = Just "Please connect your wallet" }, Cmd.none )
 
                 Just wallet ->
-                    ( handleDisburseUpdate
-                        (handleBuildDisburseTransaction ctx.localStateUtxos ctx.networkId wallet currentTime)
-                        model
+                    let
+                        buildCtx =
+                            { localStateUtxos = ctx.localStateUtxos
+                            , networkId = ctx.networkId
+                            , wallet = wallet
+                            }
+                    in
+                    ( handleDisburseUpdate model <|
+                        \action form ->
+                            case Disburse.buildTx buildCtx action.rootUtxo currentTime action.scope form of
+                                Ok ({ tx } as txFinalized) ->
+                                    Disburse { action | status = AwaitingSignature (Transaction.computeTxId tx) txFinalized } form
+
+                                Err err ->
+                                    Disburse { action | status = BuildingFailure err } form
                     , Cmd.none
-                    , noOutMsg
                     )
 
         CancelDisburseAction ->
-            ( { model | treasuryAction = NoTreasuryAction }, Cmd.none, noOutMsg )
+            ( { model | treasuryAction = NoTreasuryAction }, Cmd.none )
 
 
 handleStartDisburse : StartDisburseInfo -> Model -> Model
@@ -506,254 +490,28 @@ handleStartDisburse { scopeName, scope, allOwners, rootUtxo, spendingUtxo } mode
                 , status = ActionIdle
                 }
 
-            disburseForm =
-                { selectedUtxo = spendingUtxo
-                , selectedScopeOwners = defaultOwnerSection
-                , recipients = [ { address = "", value = (Tuple.second spendingUtxo).amount.lovelace } ]
-                , error = Nothing
-                }
-
-            defaultOwnerSection =
-                case scopeName of
-                    "contingency" ->
-                        List.map (\( name, multisig ) -> ( name, multisig, True )) allOwners
-
-                    _ ->
-                        List.map (\( name, multisig ) -> ( name, multisig, name == scopeName )) allOwners
+            form =
+                Disburse.initForm scopeName allOwners spendingUtxo
         in
-        { model | treasuryAction = Disburse actionState disburseForm, error = Nothing }
+        { model | treasuryAction = Disburse actionState form, error = Nothing }
 
     else
         { model | error = Just <| scopeName ++ " treasury is empty. No disbursement possible." }
 
 
-addRecipient : DisburseForm -> DisburseForm
-addRecipient ({ recipients } as form) =
-    { form | recipients = { address = "", value = N.zero } :: recipients }
-
-
-removeRecipient : Int -> DisburseForm -> DisburseForm
-removeRecipient index ({ recipients } as form) =
-    { form | recipients = List.Extra.removeAt index recipients }
-
-
-handleCheckOwner : String -> Bool -> DisburseForm -> DisburseForm
-handleCheckOwner scopeOwnerName isChecked ({ selectedScopeOwners } as form) =
-    let
-        updatedSelection =
-            List.Extra.updateIf (\( name, _, _ ) -> name == scopeOwnerName)
-                (\( name, multisig, _ ) -> ( name, multisig, isChecked ))
-                selectedScopeOwners
-    in
-    { form | selectedScopeOwners = updatedSelection }
-
-
-setRecipientAddress : Int -> String -> DisburseForm -> DisburseForm
-setRecipientAddress index address ({ recipients } as form) =
-    let
-        updatedRecipients =
-            List.Extra.updateAt index
-                (\recipient -> { recipient | address = address })
-                recipients
-    in
-    { form | recipients = updatedRecipients, error = Nothing }
-
-
-setRecipientValue : Int -> String -> DisburseForm -> DisburseForm
-setRecipientValue index value form =
-    case N.fromString value of
-        Just okValue ->
-            let
-                updatedRecipients =
-                    List.Extra.updateAt index
-                        (\recipient -> { recipient | value = okValue })
-                        form.recipients
-            in
-            { form | recipients = updatedRecipients, error = Nothing }
-
-        Nothing ->
-            { form | error = Just <| "Invalid value: " ++ value }
-
-
-handleDisburseFormUpdate : (DisburseForm -> DisburseForm) -> Model -> Model
+handleDisburseFormUpdate : (Disburse.Form -> Disburse.Form) -> Model -> Model
 handleDisburseFormUpdate formUpdate model =
-    handleDisburseUpdate (\state form -> Disburse state <| formUpdate form) model
+    handleDisburseUpdate model (\state form -> Disburse state <| formUpdate form)
 
 
-handleDisburseUpdate : (ScopeActionState -> DisburseForm -> TreasuryAction) -> Model -> Model
-handleDisburseUpdate disburseUpdate model =
+handleDisburseUpdate : Model -> (ScopeActionState -> Disburse.Form -> TreasuryAction) -> Model
+handleDisburseUpdate model disburseUpdate =
     case model.treasuryAction of
         Disburse disburseState form ->
             { model | treasuryAction = disburseUpdate disburseState form, error = Nothing }
 
         _ ->
             model
-
-
-handleBuildDisburseTransaction : Utxo.RefDict Output -> NetworkId -> Cip30.Wallet -> Posix -> ScopeActionState -> DisburseForm -> TreasuryAction
-handleBuildDisburseTransaction localStateUtxos networkId wallet currentTime disburseState form =
-    let
-        spentUtxo =
-            form.selectedUtxo
-
-        -- Extract signers from the scope owners.
-        -- TODO: actually we should let finer grained control from users in the form.
-        requiredSigners =
-            form.selectedScopeOwners
-                |> List.filterMap
-                    (\( _, multisig, isChecked ) ->
-                        if isChecked then
-                            Just <| MultisigScript.extractRequiredSigners multisig
-
-                        else
-                            Nothing
-                    )
-                |> List.concat
-
-        recipients : List TxIntent
-        recipients =
-            form.recipients
-                |> List.filterMap
-                    (\{ address, value } ->
-                        Address.fromString address
-                            |> Maybe.map (\addr -> TxIntent.SendTo addr <| Value.onlyLovelace value)
-                    )
-
-        totalValueSpent =
-            form.recipients
-                |> List.foldl (\{ value } -> N.add value) N.zero
-                |> Value.onlyLovelace
-
-        -- Continue building the Tx
-        slotConfig =
-            case networkId of
-                Mainnet ->
-                    Uplc.slotConfigMainnet
-
-                Testnet ->
-                    Uplc.slotConfigPreview
-
-        slot60sAgo =
-            (Time.posixToMillis currentTime - 1000 * 60)
-                |> Time.millisToPosix
-                |> Uplc.timeToSlot slotConfig
-
-        slotIn6Hours =
-            (Time.posixToMillis currentTime + 1000 * 3600 * 6)
-                |> Time.millisToPosix
-                |> Uplc.timeToSlot slotConfig
-
-        validityRange =
-            Just { start = N.toInt slot60sAgo, end = slotIn6Hours }
-
-        -- ( disburseTxIntents, disburseOtherInfo )
-        disburseIntentsResult =
-            disburse networkId disburseState.rootUtxo disburseState.scope requiredSigners validityRange spentUtxo (\_ -> recipients) totalValueSpent
-
-        feeSource =
-            Cip30.walletChangeAddress wallet
-
-        txResult =
-            disburseIntentsResult
-                |> Result.andThen
-                    (\( disburseTxIntents, disburseOtherInfo ) ->
-                        TxIntent.finalizeAdvanced
-                            { govState = TxIntent.emptyGovernanceState
-                            , localStateUtxos = localStateUtxos
-                            , coinSelectionAlgo = CoinSelection.largestFirst
-                            , evalScriptsCosts = TxIntent.defaultEvalScriptsCosts feeSource disburseTxIntents
-                            , costModels = Uplc.conwayDefaultCostModels
-                            }
-                            (TxIntent.AutoFee { paymentSource = feeSource })
-                            disburseOtherInfo
-                            disburseTxIntents
-                            |> Result.mapError TxIntent.errorToString
-                    )
-
-        updatedDisburseState =
-            case txResult of
-                Ok ({ tx } as txFinalized) ->
-                    { disburseState | status = AwaitingSignature (Transaction.computeTxId tx) txFinalized }
-
-                Err err ->
-                    { disburseState | status = BuildingFailure err }
-    in
-    Disburse updatedDisburseState form
-
-
-{-| Disburse funds from one UTxO in the given scope.
--}
-disburse : NetworkId -> OutputReference -> Scope -> List (Bytes CredentialHash) -> Maybe { start : Int, end : Natural } -> ( OutputReference, Output ) -> (Value -> List TxIntent) -> Value -> Result String ( List TxIntent, List TxOtherInfo )
-disburse networkId rootUtxoRef scope requiredSigners validityRange ( spentUtxoRef, spentOutput ) receivers value =
-    let
-        ( _, treasuryScript ) =
-            scope.sundaeTreasuryScript
-
-        treasuryWitnessSource =
-            case scope.sundaeTreasuryScriptRef of
-                Nothing ->
-                    Witness.ByValue <| Script.cborWrappedBytes treasuryScript
-
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
-
-        spendConfig : SpendConfig
-        spendConfig =
-            { scriptWitnessSource = treasuryWitnessSource
-            , registryOutputRef = Tuple.first scope.registryUtxo
-            , requiredSigners = requiredSigners
-            , requiredWithdrawals = requiredWithdrawals
-            , spentInputRef = spentUtxoRef
-            , spentOutput = spentOutput
-            , validityRange = validityRange
-            }
-
-        requiredWithdrawals =
-            -- Withdrawal with the permissions script
-            [ { stakeCredential =
-                    { networkId = networkId
-                    , stakeCredential = ScriptHash permissionsScriptHash
-                    }
-              , amount = N.zero
-              , scriptWitness =
-                    Just <|
-                        Witness.Plutus
-                            { script =
-                                ( Script.plutusVersion permissionsScript
-                                , permissionsWitnessSource
-                                )
-                            , redeemerData = \_ -> Data.List []
-                            , requiredSigners = requiredSigners
-                            }
-              }
-            ]
-
-        ( permissionsScriptHash, permissionsScript ) =
-            scope.permissionsScript
-
-        permissionsWitnessSource =
-            case scope.permissionsScriptRef of
-                Nothing ->
-                    Witness.ByValue <| Script.cborWrappedBytes permissionsScript
-
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
-
-        overflowValue =
-            Value.subtract value spentOutput.amount
-
-        ( txIntents, otherIntents ) =
-            Treasury.disburse spendConfig receivers value
-    in
-    if overflowValue == Value.zero then
-        Ok <| ( txIntents, TxIntent.TxReferenceInput rootUtxoRef :: otherIntents )
-
-    else
-        Err <| "Trying to disburse more than is available in this UTxO. Overflow value is: " ++ Debug.toString overflowValue
-
-
-
---
 
 
 createPublishScriptTx : UpdateContext a msg -> Bytes CredentialHash -> PlutusScript -> Model -> ( Model, Cmd msg, OutMsg )
@@ -1166,30 +924,24 @@ viewMergeUtxosAction { toMsg, routingConfig, connectedWallet } mergeState =
 -- Disburse
 
 
-viewDisburseAction : ViewContext a msg -> ScopeActionState -> DisburseForm -> Html msg
+viewDisburseAction : ViewContext a msg -> ScopeActionState -> Disburse.Form -> Html msg
 viewDisburseAction { toMsg, routingConfig, connectedWallet } actionState form =
     div []
         [ Html.h3 [] [ text ("Disburse - " ++ actionState.scopeName ++ " Scope") ]
         , case actionState.status of
             ActionIdle ->
+                let
+                    disburseCtx =
+                        { connectedWallet = connectedWallet
+                        , msg =
+                            { from = DisburseFormMsg
+                            , cancel = CancelDisburseAction
+                            , buildTx = BuildDisburseTransaction
+                            }
+                        }
+                in
                 Html.map (toMsg << TreasuryDisburseMsg) <|
-                    case connectedWallet of
-                        Nothing ->
-                            div []
-                                [ Html.p [] [ text "Please connect your wallet, it will be used to pay the Tx fees." ]
-                                , Html.button [ onClick CancelDisburseAction ] [ text "Cancel" ]
-                                ]
-
-                        Just _ ->
-                            div []
-                                [ viewPickedUtxo form.selectedUtxo
-                                , viewSecondSignerPicker actionState.scopeName form.selectedScopeOwners
-                                , viewRecipientsSection form
-                                , Html.h4 [] [ text "Tx building" ]
-                                , Html.button [ onClick BuildDisburseTransaction ] [ text "Build Transaction" ]
-                                , Html.button [ onClick CancelDisburseAction ] [ text "Cancel" ]
-                                , viewError form.error
-                                ]
+                    Disburse.viewForm disburseCtx actionState.scopeName form
 
             BuildingFailure error ->
                 Html.map (toMsg << TreasuryDisburseMsg) <|
@@ -1217,76 +969,4 @@ viewDisburseAction { toMsg, routingConfig, connectedWallet } actionState form =
                         [ SignTx.signingLink routingConfig signingPrep [] [ text "Sign on signing page" ] ]
                     , Html.button [ onClick <| toMsg <| TreasuryDisburseMsg CancelDisburseAction ] [ text "Cancel" ]
                     ]
-        ]
-
-
-viewPickedUtxo : ( OutputReference, Output ) -> Html msg
-viewPickedUtxo utxo =
-    Html.p []
-        (Html.p [] [ text "Picked UTxO for spending:" ] :: viewDetailedUtxo utxo)
-
-
-viewSecondSignerPicker : String -> List ( String, MultisigScript, Bool ) -> Html TreasuryDisburseMsg
-viewSecondSignerPicker scopeName selectedScopeOwners =
-    case scopeName of
-        "contingency" ->
-            Html.p []
-                [ text "All scope owners must approve a disburse action for the contingency scope."
-                , Html.ul [] (List.map (\owner -> Html.li [] [ viewScopeOwner owner ]) selectedScopeOwners)
-                ]
-
-        _ ->
-            Html.p []
-                [ Html.p [] [ text "You and at least one other scope owner must approve a disburse action. Pick the signers:" ]
-                , div [] (List.map (viewOwnerCheckbox scopeName) selectedScopeOwners)
-                ]
-
-
-viewOwnerCheckbox : String -> ( String, MultisigScript, Bool ) -> Html TreasuryDisburseMsg
-viewOwnerCheckbox disbursingScopeName ( name, multisig, checked ) =
-    let
-        attributes =
-            if name == disbursingScopeName then
-                -- The disbursing scope must sign, it cannot be unchecked
-                [ HA.checked True, HA.disabled True ]
-
-            else
-                [ HA.checked checked, HE.onCheck <| CheckOwner name ]
-    in
-    div []
-        [ Html.label []
-            [ Html.input (HA.type_ "checkbox" :: attributes) []
-            , viewScopeOwner ( name, multisig, () )
-            ]
-        ]
-
-
-viewScopeOwner : ( String, MultisigScript, a ) -> Html msg
-viewScopeOwner ( name, multisig, _ ) =
-    text <| name ++ ": " ++ Debug.toString multisig
-
-
-viewRecipientsSection : DisburseForm -> Html TreasuryDisburseMsg
-viewRecipientsSection { recipients } =
-    Html.div []
-        [ Html.h4 [] [ text "Recipients" ]
-        , Html.p []
-            [ text "Paste the recipient’s address and value: "
-            , Html.button [ onClick AddRecipient ] [ text "add recipient" ]
-            ]
-        , div [] (List.indexedMap viewRecipient recipients)
-        ]
-
-
-viewRecipient : Int -> { address : String, value : Natural } -> Html TreasuryDisburseMsg
-viewRecipient index { address, value } =
-    div []
-        [ text <| "Recipient " ++ String.fromInt (index + 1) ++ ": "
-        , Html.label []
-            [ Html.input [ HA.type_ "text", HA.placeholder "paste address", HA.value address, HE.onInput (SetRecipientAddress index) ] [] ]
-        , text " "
-        , Html.label []
-            [ Html.input [ HA.type_ "number", HA.placeholder "value", HA.value (N.toString value), HE.onInput (SetRecipientValue index) ] [] ]
-        , text " "
-        , Html.button [ onClick (RemoveRecipient index) ] [ text "remove" ]
         ]
