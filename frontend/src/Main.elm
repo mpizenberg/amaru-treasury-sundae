@@ -27,8 +27,8 @@ import Result.Extra
 import Route exposing (Route)
 import Storage
 import TreasuryManagement exposing (ActionStatus(..), TreasuryAction(..), TreasuryManagement(..), TxState(..))
+import TreasuryManagement.Loading
 import TreasuryManagement.LoadingParams as LoadingParams
-import TreasuryManagement.Setup
 
 
 type alias Flags =
@@ -101,7 +101,7 @@ type Msg
 type TaskCompleted
     = ReadLoadingParams (Maybe LoadingParams.Form)
     | LoadingParamsSaved
-    | TreasuryManagementTask TreasuryManagement.TaskCompleted
+    | TreasuryLoadingTask TreasuryManagement.Loading.TaskCompleted
 
 
 
@@ -127,7 +127,7 @@ type alias Model =
     }
 
 
-initialModel : JD.Value -> TreasuryManagement.Setup.Scripts -> Int -> Model
+initialModel : JD.Value -> TreasuryManagement.Loading.Scripts -> Int -> Model
 initialModel db scripts posixTimeMs =
     let
         treasuryLoadingParams =
@@ -332,7 +332,7 @@ update msg model =
                         , send = sendTask
                         , onComplete = OnTaskComplete
                         }
-                        (List.map (ConcurrentTask.map TreasuryManagementTask) runTasks)
+                        (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
             in
             ( { model
                 | localStateUtxos = updatedLocalState
@@ -568,10 +568,10 @@ handleCompletedTask model taskCompleted =
         LoadingParamsSaved ->
             ( model, Cmd.none )
 
-        TreasuryManagementTask subTask ->
+        TreasuryLoadingTask subTask ->
             let
-                ( subModel, subCmds, { updatedLocalState, runTasks } ) =
-                    TreasuryManagement.handleCompletedTask ctx subTask model.treasuryManagementModel
+                ( subModel, { updatedLocalState, runTasks } ) =
+                    TreasuryManagement.handleCompletedLoadingTask ctx subTask model.treasuryManagementModel
 
                 ( updatedTaskPool, tasksCmds ) =
                     ConcurrentTask.Extra.attemptEach
@@ -579,14 +579,14 @@ handleCompletedTask model taskCompleted =
                         , send = sendTask
                         , onComplete = OnTaskComplete
                         }
-                        (List.map (ConcurrentTask.map TreasuryManagementTask) runTasks)
+                        (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
             in
             ( { model
                 | localStateUtxos = updatedLocalState
                 , taskPool = updatedTaskPool
                 , treasuryManagementModel = subModel
               }
-            , Cmd.batch (subCmds :: tasksCmds)
+            , Cmd.batch tasksCmds
             )
 
 

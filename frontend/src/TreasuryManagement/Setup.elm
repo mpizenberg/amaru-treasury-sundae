@@ -20,17 +20,11 @@ import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
 import Time exposing (Posix)
 import Treasury
+import TreasuryManagement.Loading exposing (LoadedTreasury, Scripts)
+import TreasuryManagement.LoadingParams exposing (LoadingParams)
 import TreasuryManagement.Scope as Scope exposing (Scope)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
 import Types
-
-
-type alias Scripts =
-    { sundaeTreasury : PlutusScript
-    , registryTrap : PlutusScript
-    , scopesTrap : PlutusScript
-    , scopePermissions : PlutusScript
-    }
 
 
 type alias LastStepParams =
@@ -52,21 +46,6 @@ type alias SetupTxs =
     { scopes : SignTx.Prep
     , permissions : SignTx.Prep
     , registries : SignTx.Prep
-    }
-
-
-type alias LoadedTreasury =
-    { rootUtxo : ( OutputReference, Output )
-    , loadingParams : LoadingParams
-    , scopes : Scopes Scope
-    , contingency : Scope
-    }
-
-
-type alias LoadingParams =
-    { pragmaScriptHash : Bytes CredentialHash
-    , registriesSeedUtxo : OutputReference
-    , expiration : Posix
     }
 
 
