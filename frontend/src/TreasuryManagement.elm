@@ -4,16 +4,12 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
-import Cardano.CoinSelection as CoinSelection
-import Cardano.Data as Data
 import Cardano.Script as Script exposing (NativeScript(..), PlutusScript, PlutusVersion(..))
 import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxExamples exposing (prettyTx)
-import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalized, TxIntent, TxOtherInfo)
-import Cardano.Uplc as Uplc
+import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalized)
 import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference, TransactionId)
 import Cardano.Value as Value
-import Cardano.Witness as Witness
 import Cmd.Extra
 import ConcurrentTask exposing (ConcurrentTask)
 import Dict.Any
@@ -22,16 +18,15 @@ import Html.Events exposing (onClick)
 import Json.Decode as JD
 import List.Extra
 import MultisigScript
-import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
 import Platform.Cmd as Cmd
 import Route
 import Task
 import Time exposing (Posix)
-import Treasury
 import TreasuryManagement.Disburse as Disburse
 import TreasuryManagement.Loading as Loading exposing (LoadedTreasury, LoadingTreasury, TaskCompleted, viewRootUtxo)
 import TreasuryManagement.LoadingParams as LoadingParams
+import TreasuryManagement.Merge as Merge
 import TreasuryManagement.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
 import TreasuryManagement.Scopes as Scopes
 import TreasuryManagement.Setup exposing (SetupTxs)
@@ -118,72 +113,6 @@ type ActionStatus
     = ActionIdle
     | BuildingFailure String
     | AwaitingSignature (Bytes TransactionId) TxFinalized
-
-
-{-| Merge all UTxOs from a given scope.
--}
-mergeUtxos : NetworkId -> OutputReference -> Scope -> List (Bytes CredentialHash) -> Maybe { start : Int, end : Natural } -> ( List TxIntent, List TxOtherInfo )
-mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
-    let
-        utxos =
-            Dict.Any.toList scope.treasuryUtxos
-
-        permissionsWitnessSource =
-            case scope.permissionsScriptRef of
-                Nothing ->
-                    Witness.ByValue <| Script.cborWrappedBytes permissionsScript
-
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
-
-        requiredWithdrawals =
-            -- Withdrawal with the scope owner script
-            [ { stakeCredential =
-                    { networkId = networkId
-                    , stakeCredential = ScriptHash permissionsScriptHash
-                    }
-              , amount = N.zero
-              , scriptWitness =
-                    Just <|
-                        Witness.Plutus
-                            { script =
-                                ( Script.plutusVersion permissionsScript
-                                , permissionsWitnessSource
-                                )
-                            , redeemerData = \_ -> Data.Constr N.zero []
-                            , requiredSigners = requiredSigners
-                            }
-              }
-            ]
-
-        ( permissionsScriptHash, permissionsScript ) =
-            scope.permissionsScript
-
-        ( treasuryScriptHash, treasuryScript ) =
-            scope.sundaeTreasuryScript
-
-        treasuryWitnessSource =
-            case scope.sundaeTreasuryScriptRef of
-                Nothing ->
-                    Witness.ByValue <| Script.cborWrappedBytes treasuryScript
-
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
-
-        -- The address must have a stake cred (delegated to always abstain)
-        scopeTreasuryAddress =
-            Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
-    in
-    Treasury.reorganize
-        { scriptWitnessSource = treasuryWitnessSource
-        , registryOutputRef = Tuple.first scope.registryUtxo
-        , additionalOutputRefs = [ rootUtxo ]
-        , requiredSigners = requiredSigners
-        , validityRange = validityRange
-        , requiredWithdrawals = requiredWithdrawals
-        , spentUtxos = utxos
-        , receivers = \value -> [ TxIntent.SendTo scopeTreasuryAddress value ]
-        }
 
 
 
@@ -333,6 +262,10 @@ handleBuildSetupTxs ctx scripts form =
             TreasurySetupForm form
 
 
+
+-- Merge
+
+
 handleTreasuryMergingMsg : UpdateContext a msg -> TreasuryMergingMsg -> Model -> ( Model, Cmd msg )
 handleTreasuryMergingMsg ctx msg model =
     case msg of
@@ -345,7 +278,7 @@ handleTreasuryMergingMsg ctx msg model =
             )
 
         BuildMergeTransactionWithTime requiredSigners currentTime ->
-            ( handleBuildMergeTransaction ctx model requiredSigners currentTime, Cmd.none )
+            ( handleBuildMergeTransaction ctx requiredSigners currentTime model, Cmd.none )
 
         CancelMergeAction ->
             ( { model | treasuryAction = NoTreasuryAction }, Cmd.none )
@@ -368,69 +301,35 @@ handleStartMergeUtxos scopeName scope rootUtxo model =
         { model | error = Just "Scope has less than 2 UTxOs, so there is nothing to merge." }
 
 
-handleBuildMergeTransaction : UpdateContext a msg -> Model -> List (Bytes CredentialHash) -> Posix -> Model
-handleBuildMergeTransaction ctx model requiredSigners currentTime =
-    case ( model.treasuryAction, ctx.connectedWallet ) of
+handleBuildMergeTransaction : UpdateContext a msg -> List (Bytes CredentialHash) -> Posix -> Model -> Model
+handleBuildMergeTransaction ctx requiredSigners currentTime ({ treasuryAction } as model) =
+    case ( treasuryAction, ctx.connectedWallet ) of
         ( MergeTreasuryUtxos mergeState, Just wallet ) ->
             let
-                slotConfig =
-                    case ctx.networkId of
-                        Mainnet ->
-                            Uplc.slotConfigMainnet
+                buildCtx =
+                    { localStateUtxos = ctx.localStateUtxos
+                    , networkId = ctx.networkId
+                    , wallet = wallet
+                    }
 
-                        Testnet ->
-                            Uplc.slotConfigPreview
-
-                slot60sAgo =
-                    (Time.posixToMillis currentTime - 1000 * 60)
-                        |> Time.millisToPosix
-                        |> Uplc.timeToSlot slotConfig
-
-                slotIn6Hours =
-                    (Time.posixToMillis currentTime + 1000 * 3600 * 6)
-                        |> Time.millisToPosix
-                        |> Uplc.timeToSlot slotConfig
-
-                validityRange =
-                    Just { start = N.toInt slot60sAgo, end = slotIn6Hours }
-
-                ( mergeTxIntents, mergeOtherInfo ) =
-                    mergeUtxos ctx.networkId mergeState.rootUtxo mergeState.scope requiredSigners validityRange
-
-                feeSource =
-                    Cip30.walletChangeAddress wallet
-
-                txResult =
-                    TxIntent.finalizeAdvanced
-                        { govState = TxIntent.emptyGovernanceState
-                        , localStateUtxos = ctx.localStateUtxos
-                        , coinSelectionAlgo = CoinSelection.largestFirst
-                        , evalScriptsCosts = TxIntent.defaultEvalScriptsCosts feeSource mergeTxIntents
-                        , costModels = Uplc.conwayDefaultCostModels
-                        }
-                        (TxIntent.AutoFee { paymentSource = feeSource })
-                        mergeOtherInfo
-                        mergeTxIntents
-
-                updatedMergeState =
-                    case txResult of
-                        Ok ({ tx } as txFinalized) ->
-                            { mergeState | status = AwaitingSignature (Transaction.computeTxId tx) txFinalized }
-
-                        Err err ->
-                            { mergeState | status = BuildingFailure <| TxIntent.errorToString err }
-
-                updatedModel =
-                    { model | treasuryAction = MergeTreasuryUtxos updatedMergeState }
+                mergeUpdate action =
+                    { model | treasuryAction = MergeTreasuryUtxos action, error = Nothing }
             in
-            updatedModel
+            case Merge.buildTx buildCtx mergeState.rootUtxo currentTime mergeState.scope requiredSigners of
+                Ok ({ tx } as txFinalized) ->
+                    mergeUpdate
+                        { mergeState | status = AwaitingSignature (Transaction.computeTxId tx) txFinalized }
+
+                Err err ->
+                    mergeUpdate
+                        { mergeState | status = BuildingFailure <| TxIntent.errorToString err }
 
         _ ->
             model
 
 
 
---
+-- Disburse
 
 
 handleTreasuryDisburseMsg : UpdateContext a msg -> TreasuryDisburseMsg -> Model -> ( Model, Cmd msg )
@@ -508,6 +407,10 @@ handleDisburseUpdate model disburseUpdate =
 
         _ ->
             model
+
+
+
+-- Publish
 
 
 createPublishScriptTx : UpdateContext a msg -> Bytes CredentialHash -> PlutusScript -> Model -> ( Model, Cmd msg, OutMsg )
