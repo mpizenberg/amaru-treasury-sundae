@@ -1,4 +1,4 @@
-module Treasury exposing (..)
+module Sundae exposing (..)
 
 import Bytes.Comparable exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId, StakeAddress)

@@ -17,8 +17,8 @@ import Html.Events as HE exposing (onClick)
 import List.Extra
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
+import Sundae exposing (SpendConfig)
 import Time exposing (Posix)
-import Treasury exposing (SpendConfig)
 import TreasuryManagement.Scope exposing (Scope, viewDetailedUtxo)
 import Utils exposing (viewError)
 
@@ -251,7 +251,7 @@ disburse networkId rootUtxoRef scope requiredSigners validityRange ( spentUtxoRe
             Value.subtract value spentOutput.amount
 
         ( txIntents, otherIntents ) =
-            Treasury.disburse spendConfig receivers value
+            Sundae.disburse spendConfig receivers value
     in
     if overflowValue == Value.zero then
         Ok <| ( txIntents, TxIntent.TxReferenceInput rootUtxoRef :: otherIntents )

@@ -18,8 +18,8 @@ import Integer as I
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
+import Sundae
 import Time exposing (Posix)
-import Treasury
 import TreasuryManagement.Loading exposing (LoadedTreasury)
 import TreasuryManagement.LoadingParams exposing (LoadingParams)
 import TreasuryManagement.Scope as Scope exposing (Scope, Scripts)
@@ -428,7 +428,7 @@ setupTreasury expiration registryScriptHash permissionsScriptHash sundaeTreasury
             , payoutUpperbound = N.zero
             }
     in
-    Treasury.initializeScript treasuryConfig sundaeTreasuryScript
+    Sundae.initializeScript treasuryConfig sundaeTreasuryScript
 
 
 pickSeedUtxo : Utxo.RefDict Output -> Address -> Natural -> Result String ( OutputReference, Output )

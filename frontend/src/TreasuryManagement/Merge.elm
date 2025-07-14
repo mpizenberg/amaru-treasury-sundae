@@ -12,8 +12,8 @@ import Cardano.Utxo as Utxo exposing (Output, OutputReference)
 import Cardano.Witness as Witness
 import Dict.Any
 import Natural as N exposing (Natural)
+import Sundae
 import Time exposing (Posix)
-import Treasury
 import TreasuryManagement.Scope exposing (Scope)
 
 
@@ -121,7 +121,7 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
         scopeTreasuryAddress =
             Address.base networkId (Address.ScriptHash treasuryScriptHash) (Address.ScriptHash treasuryScriptHash)
     in
-    Treasury.reorganize
+    Sundae.reorganize
         { scriptWitnessSource = treasuryWitnessSource
         , registryOutputRef = Tuple.first scope.registryUtxo
         , additionalOutputRefs = [ rootUtxo ]

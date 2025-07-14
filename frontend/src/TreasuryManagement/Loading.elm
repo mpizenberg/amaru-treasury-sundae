@@ -19,8 +19,8 @@ import Natural as N
 import RemoteData exposing (RemoteData)
 import Result.Extra
 import Storage
+import Sundae
 import Time exposing (Posix)
-import Treasury
 import TreasuryManagement.LoadingParams as LoadingParams exposing (LoadingParams, viewPragmaScopesScriptHash, viewRegistriesSeedUtxo)
 import TreasuryManagement.Scope exposing (Scope, Scripts, viewOwner, viewPermissionsScript, viewRegistryUtxo, viewTreasuryScript)
 import TreasuryManagement.Scopes as Scopes exposing (Scopes)
@@ -562,7 +562,7 @@ applySundaeTreasuryScript unappliedScript scope =
             , payoutUpperbound = N.zero
             }
     in
-    Treasury.initializeScript treasuryConfig unappliedScript
+    Sundae.initializeScript treasuryConfig unappliedScript
         |> Result.Extra.unpack RemoteData.Failure
             (\applied -> RemoteData.Success ( Script.hash <| Script.Plutus applied, applied ))
 
