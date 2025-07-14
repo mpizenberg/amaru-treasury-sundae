@@ -8,6 +8,8 @@
     "make:debug": "elm-cardano make --debug src/Main.elm --output main.js",
     "make:dist": "rm -rf dist/ && mkdir -p dist && echo '/page/* /index.html 200' > dist/_redirects && cp -L -r index.html main.js elm-cardano.js storage.js elm-concurrent-task.js styles.css sundae-plutus.json amaru-plutus.json pkg-uplc-wasm dist/",
     "watch": "elm-watch hot",
+    "lint": "elm-review",
+    "lint:fix": "elm-review --fix",
     "format": "elm-format src/",
     "format:validate": "elm-format --validate src/",
     "docs": "elm-doc-preview --port 8911"
