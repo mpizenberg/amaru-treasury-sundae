@@ -1,4 +1,4 @@
-module Treasury.Scope exposing (..)
+module Treasury.Scope exposing (Scope, Scripts, StartDisburseInfo, ViewContext, setup, view, viewDetailedUtxo, viewOwner, viewPermissionsScript, viewRegistryUtxo, viewSetup, viewTreasuryScript)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (CredentialHash, NetworkId)

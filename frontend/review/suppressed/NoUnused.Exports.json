@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "automatically created by": "elm-review suppress",
+  "learn more": "elm-review suppress --help",
+  "suppressions": [
+    { "count": 3, "filePath": "src/Treasury/SundaeTypes.elm" },
+    { "count": 1, "filePath": "src/ConcurrentTask/Extra.elm" },
+    { "count": 1, "filePath": "src/Storage.elm" },
+    { "count": 1, "filePath": "src/Treasury/Sundae.elm" }
+  ]
+}

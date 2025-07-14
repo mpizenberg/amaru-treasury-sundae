@@ -1,4 +1,4 @@
-module Utils exposing (..)
+module Utils exposing (displayPosixDate, spinner, viewError, viewExpirationDate)
 
 import Html exposing (Html, text)
 import Html.Attributes as HA

@@ -1,4 +1,4 @@
-module Page.SignTx exposing (..)
+module Page.SignTx exposing (Model(..), Msg(..), Prep, State, Subject(..), UpdateContext, ViewContext, addWalletSignatures, getTxInfo, initialModel, recordSubmittedTx, resetSubmission, signingLink, update, view)
 
 {-| This module handles the signing process for Cardano transactions, particularly
 focusing on complex scenarios like Native or Plutus script multi-signatures.
@@ -75,10 +75,6 @@ type alias Prep =
 -}
 type Subject
     = Unknown
-    | TreasurySetup
-    | MergeUtxos
-    | Disburse
-    | PublishScript (Bytes CredentialHash)
 
 
 initialModel : Subject -> Maybe Prep -> Model

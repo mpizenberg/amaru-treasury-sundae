@@ -1,12 +1,12 @@
-module Treasury.Setup exposing (..)
+module Treasury.Setup exposing (LastStepParams, SetupTxs, setupAmaruTreasury)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
-import Cardano.Address as Address exposing (Address, Credential(..), CredentialHash, NetworkId(..))
+import Cardano.Address as Address exposing (Address, CredentialHash, NetworkId)
 import Cardano.Cip30 as Cip30
 import Cardano.CoinSelection as CoinSelection
 import Cardano.Data as Data
-import Cardano.Script as Script exposing (NativeScript(..), PlutusScript, PlutusVersion(..))
+import Cardano.Script as Script exposing (PlutusScript)
 import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxIntent as TxIntent exposing (TxFinalizationError, TxFinalized)
 import Cardano.Uplc as Uplc
@@ -53,7 +53,7 @@ setupAmaruTreasury : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet
 setupAmaruTreasury localStateUtxos scripts networkId connectedWallet { expiration, scopeOwners } =
     setupAmaruScopes localStateUtxos scripts.scopesTrap networkId connectedWallet scopeOwners
         |> Result.andThen
-            (\( ( scopesSeedUtxo, setupScopesTx ), ( scopesTrapScriptHash, scopesTrapScript ) ) ->
+            (\( ( scopesSeedUtxo, setupScopesTx ), ( scopesTrapScriptHash, _ ) ) ->
                 let
                     scopesTxId =
                         Transaction.computeTxId setupScopesTx.tx
@@ -61,7 +61,7 @@ setupAmaruTreasury localStateUtxos scripts networkId connectedWallet { expiratio
                     localStateAfterAmaruScopes =
                         (TxIntent.updateLocalState scopesTxId setupScopesTx.tx localStateUtxos).updatedState
                 in
-                setupPermissions localStateAfterAmaruScopes scripts.scopePermissions connectedWallet ( setupScopesTx, scopesTrapScriptHash, scopesTrapScript )
+                setupPermissions localStateAfterAmaruScopes scripts.scopePermissions connectedWallet scopesTrapScriptHash
                     |> Result.andThen
                         (\( setupPermissionsTx, scopesPermissions, contingencyPermissions ) ->
                             let
@@ -327,8 +327,8 @@ setupAmaruScopes localStateUtxos scopesTrapScript networkId connectedWallet scop
             )
 
 
-setupPermissions : Utxo.RefDict Output -> PlutusScript -> Cip30.Wallet -> ( TxFinalized, Bytes CredentialHash, PlutusScript ) -> Result String ( TxFinalized, Scopes ( Bytes CredentialHash, PlutusScript ), ( Bytes CredentialHash, PlutusScript ) )
-setupPermissions localStateUtxos scopePermissionsScript connectedWallet ( { tx }, scopesTrapScriptHash, scopesTrapScript ) =
+setupPermissions : Utxo.RefDict Output -> PlutusScript -> Cip30.Wallet -> Bytes CredentialHash -> Result String ( TxFinalized, Scopes ( Bytes CredentialHash, PlutusScript ), ( Bytes CredentialHash, PlutusScript ) )
+setupPermissions localStateUtxos scopePermissionsScript connectedWallet scopesTrapScriptHash =
     let
         applyPermissionsScript scopeIndex =
             Uplc.applyParamsToScript

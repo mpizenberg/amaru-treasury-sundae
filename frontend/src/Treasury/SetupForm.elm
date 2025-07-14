@@ -1,4 +1,4 @@
-module Treasury.SetupForm exposing (..)
+module Treasury.SetupForm exposing (Msg(..), SetupForm, SetupFormValidation, ViewContext, init, update, view)
 
 import Bytes.Comparable as Bytes
 import Html exposing (Html, div, text)

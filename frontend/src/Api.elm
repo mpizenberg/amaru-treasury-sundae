@@ -1,4 +1,4 @@
-module Api exposing (..)
+module Api exposing (ProtocolParams, defaultProtocolParams, loadProtocolParams, retrieveAssetUtxo, retrieveAssetsUtxos, retrieveOutput, retrieveScriptRefUtxos, retrieveUtxosWithPaymentCreds)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)

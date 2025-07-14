@@ -1,4 +1,4 @@
-module Treasury.Scopes exposing (..)
+module Treasury.Scopes exposing (Scopes, map, map2, map4, toList, toResult)
 
 
 type alias Scopes a =

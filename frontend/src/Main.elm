@@ -1,16 +1,15 @@
-port module Main exposing (main)
+port module Main exposing (Flags, Model, Msg, Page, TaskCompleted, main)
 
 import Api exposing (ProtocolParams)
 import AppUrl exposing (AppUrl)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
-import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
+import Cardano.Address as Address exposing (CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
-import Cardano.Script as Script exposing (NativeScript(..), PlutusVersion(..), ScriptCbor)
+import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
 import Cardano.Transaction as Transaction
-import Cardano.TxIntent exposing (SpendSource(..))
-import Cardano.Utxo as Utxo exposing (DatumOption(..), Output)
+import Cardano.Utxo as Utxo exposing (Output)
 import ConcurrentTask
 import ConcurrentTask.Extra
 import Dict
@@ -21,14 +20,14 @@ import Html.Events exposing (onClick)
 import Http
 import Json.Decode as JD
 import List.Extra
-import Page.SignTx as SignTx exposing (Subject(..))
+import Page.SignTx as SignTx
 import Platform.Cmd as Cmd
 import Result.Extra
 import Route exposing (Route)
 import Storage
 import Treasury.Loading
 import Treasury.LoadingParams as LoadingParams
-import Treasury.Management exposing (ActionStatus(..), TreasuryAction(..), TreasuryManagement(..), TxState(..))
+import Treasury.Management
 import Treasury.Scope exposing (Scripts)
 
 
@@ -89,7 +88,6 @@ type Msg
     | DisconnectWallet
     | ConnectButtonClicked { id : String }
     | GotNetworkParams (Result Http.Error ProtocolParams)
-    | SignTxButtonClicked SignTx.Subject SignTx.Prep
       -- Signature page
     | SignTxMsg SignTx.Msg
       -- Treasury management
@@ -101,7 +99,6 @@ type Msg
 
 type TaskCompleted
     = ReadLoadingParams (Maybe LoadingParams.Form)
-    | LoadingParamsSaved
     | TreasuryLoadingTask Treasury.Loading.TaskCompleted
 
 
@@ -302,11 +299,6 @@ update msg model =
 
         GotNetworkParams (Ok params) ->
             ( { model | protocolParams = params }, Cmd.none )
-
-        SignTxButtonClicked signSubject signingPrep ->
-            ( { model | page = SignTxPage <| SignTx.initialModel signSubject (Just signingPrep) }
-            , Cmd.none
-            )
 
         -- Signature page
         SignTxMsg pageMsg ->
@@ -560,9 +552,6 @@ handleCompletedTask model taskCompleted =
             ( { model | treasuryManagementModel = Treasury.Management.setLoadingParamsForm paramsForm model.treasuryManagementModel }, Cmd.none )
 
         ReadLoadingParams Nothing ->
-            ( model, Cmd.none )
-
-        LoadingParamsSaved ->
             ( model, Cmd.none )
 
         TreasuryLoadingTask subTask ->

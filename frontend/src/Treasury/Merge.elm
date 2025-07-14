@@ -1,4 +1,4 @@
-module Treasury.Merge exposing (..)
+module Treasury.Merge exposing (BuildContext, buildTx)
 
 import Bytes.Comparable exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))

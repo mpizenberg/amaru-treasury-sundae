@@ -1,14 +1,14 @@
-module Treasury.Management exposing (..)
+module Treasury.Management exposing (ActionStatus(..), Model, Msg(..), OutMsg, ScopeActionState, SetupTxsState, TreasuryAction(..), TreasuryDisburseMsg(..), TreasuryManagement(..), TreasuryMergingMsg(..), TxState(..), UpdateContext, ViewContext, handleCompletedLoadingTask, init, setLoadingParamsForm, update, updateWithTx, view)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
-import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
+import Cardano.Address as Address exposing (CredentialHash, NetworkId)
 import Cardano.Cip30 as Cip30
-import Cardano.Script as Script exposing (NativeScript(..), PlutusScript, PlutusVersion(..))
+import Cardano.Script as Script exposing (NativeScript(..), PlutusScript)
 import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxExamples exposing (prettyTx)
-import Cardano.TxIntent as TxIntent exposing (SpendSource(..), TxFinalized)
-import Cardano.Utxo as Utxo exposing (DatumOption(..), Output, OutputReference, TransactionId)
+import Cardano.TxIntent as TxIntent exposing (TxFinalized)
+import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId)
 import Cardano.Value as Value
 import Cmd.Extra
 import ConcurrentTask exposing (ConcurrentTask)
@@ -31,7 +31,7 @@ import Treasury.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, view
 import Treasury.Scopes as Scopes
 import Treasury.Setup exposing (SetupTxs)
 import Treasury.SetupForm as SetupForm exposing (SetupForm)
-import Utils exposing (spinner, viewError)
+import Utils exposing (viewError)
 
 
 type alias Model =
@@ -91,7 +91,6 @@ initSetupTxsState txs treasury =
 
 type TxState
     = TxNotSubmittedYet
-    | TxSubmitting
     | TxSubmitted
 
 
@@ -503,8 +502,8 @@ updateWithTx localStateUtxos maybeTx ({ treasuryManagement, treasuryAction } as 
                 TreasuryFullyLoaded loadedTreasury ->
                     ( { model
                         | treasuryManagement =
-                            updateTreasuryUtxos txId tx loadedTreasury
-                                |> TreasuryFullyLoaded
+                            -- TODO: Detect all changes to the treasury happening in the Tx
+                            TreasuryFullyLoaded loadedTreasury
                         , treasuryAction = updateTreasuryActionWithTx txId treasuryAction
                       }
                     , OutMsg updatedLocalState []
@@ -539,12 +538,6 @@ upgradeToLoadedIfSetupIsDone ({ tracking } as state) =
 
         _ ->
             TreasurySetupTxs state
-
-
-updateTreasuryUtxos : Bytes TransactionId -> Transaction -> LoadedTreasury -> LoadedTreasury
-updateTreasuryUtxos txId tx loadedTreasury =
-    -- TODO: Detect all changes to the treasury happening in the Tx
-    loadedTreasury
 
 
 updateTreasuryActionWithTx : Bytes TransactionId -> TreasuryAction -> TreasuryAction
@@ -736,9 +729,6 @@ viewTxStatus { routingConfig } txState ({ txId, tx, expectedSignatures, signerDe
                 TxNotSubmittedYet ->
                     Html.button []
                         [ SignTx.signingLink routingConfig prep [] [ text "Sign on signing page" ] ]
-
-                TxSubmitting ->
-                    div [] [ text "Tx is being submitted ... ", spinner ]
 
                 TxSubmitted ->
                     text "Tx has been submitted!"

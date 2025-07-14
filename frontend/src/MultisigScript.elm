@@ -1,4 +1,4 @@
-module MultisigScript exposing (..)
+module MultisigScript exposing (MultisigScript(..), extractRequiredSigners, fromData, toData)
 
 import Bytes.Comparable as Bytes exposing (Any, Bytes)
 import Cardano.Address exposing (CredentialHash)

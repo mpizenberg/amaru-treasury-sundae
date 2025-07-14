@@ -1,7 +1,7 @@
-module Treasury.Sundae exposing (..)
+module Treasury.Sundae exposing (ReorganizeConfig, SpendConfig, WithdrawalIntent, disburse, initializeScript, reorganize, sweepBackToCardanoTreasury)
 
 import Bytes.Comparable exposing (Bytes)
-import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId, StakeAddress)
+import Cardano.Address exposing (CredentialHash, StakeAddress)
 import Cardano.Data as Data
 import Cardano.MultiAsset as MultiAsset
 import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
@@ -28,34 +28,6 @@ initializeScript config unappliedScript =
                 |> Debug.log "treasury config"
     in
     Uplc.applyParamsToScript [ treasuryConfigToData config ] unappliedScript
-
-
-{-| Withraw Ada from the treasury reward account.
--}
-initialWithdrawal : NetworkId -> Bytes CredentialHash -> Bytes ScriptCbor -> Natural -> List TxIntent
-initialWithdrawal networkId treasuryScriptHash treasuryScriptBytes amount =
-    let
-        treasuryRewardAccount : StakeAddress
-        treasuryRewardAccount =
-            { networkId = networkId
-            , stakeCredential = ScriptHash treasuryScriptHash
-            }
-
-        plutusScriptWitness : Witness.PlutusScript
-        plutusScriptWitness =
-            { script = ( PlutusV3, Witness.ByValue treasuryScriptBytes )
-            , redeemerData = \_ -> Data.List []
-            , requiredSigners = []
-            }
-    in
-    [ TxIntent.WithdrawRewards
-        { stakeCredential = treasuryRewardAccount
-        , amount = amount
-        , scriptWitness = Just <| Witness.Plutus plutusScriptWitness
-        }
-    , TxIntent.SendTo (Address.script networkId treasuryScriptHash)
-        (Value.onlyLovelace amount)
-    ]
 
 
 type alias SpendConfig =

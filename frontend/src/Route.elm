@@ -1,4 +1,4 @@
-module Route exposing (..)
+module Route exposing (Config, Route(..), fromLocationHref, inAppLink, toAppUrl)
 
 import AppUrl exposing (AppUrl)
 import Bytes.Comparable as Bytes exposing (Bytes)

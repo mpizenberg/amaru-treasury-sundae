@@ -1,4 +1,4 @@
-module Treasury.Loading exposing (..)
+module Treasury.Loading exposing (Context, LoadedTreasury, LoadingScope, LoadingTreasury, OutMsg, TaskCompleted(..), doubleCheckTreasuryScriptsHashes, refreshTreasuryUtxos, startTreasuryLoading, updateWithCompletedTask, upgradeIfTreasuryLoadingFinished, viewLoading, viewRootUtxo)
 
 import Api
 import Bytes.Comparable as Bytes exposing (Bytes)
@@ -20,7 +20,7 @@ import RemoteData exposing (RemoteData)
 import Result.Extra
 import Storage
 import Time exposing (Posix)
-import Treasury.LoadingParams as LoadingParams exposing (LoadingParams, viewPragmaScopesScriptHash, viewRegistriesSeedUtxo)
+import Treasury.LoadingParams as LoadingParams exposing (LoadingParams)
 import Treasury.Scope exposing (Scope, Scripts, viewOwner, viewPermissionsScript, viewRegistryUtxo, viewTreasuryScript)
 import Treasury.Scopes as Scopes exposing (Scopes)
 import Treasury.Sundae
@@ -703,9 +703,7 @@ viewLoading { rootUtxo, loadingParams, scopes, contingency } =
     div []
         [ Html.p [] [ text "Loading treasury ... ", spinner ]
         , viewLoadingRootUtxo rootUtxo
-        , viewPragmaScopesScriptHash loadingParams.pragmaScriptHash
-        , viewRegistriesSeedUtxo loadingParams.registriesSeedUtxo
-        , Utils.viewExpirationDate <| Time.posixToMillis loadingParams.expiration
+        , LoadingParams.view loadingParams
         , viewLoadingScope "ledger" scopes.ledger
         , viewLoadingScope "consensus" scopes.consensus
         , viewLoadingScope "mercenaries" scopes.mercenaries
