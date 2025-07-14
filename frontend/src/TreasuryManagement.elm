@@ -930,17 +930,31 @@ handleCompletedLoadingTask : UpdateContext a msg -> Loading.TaskCompleted -> Mod
 handleCompletedLoadingTask ctx task ({ treasuryLoadingParamsForm } as model) =
     case model.treasuryManagement of
         TreasuryLoading loadingTreasury ->
-            case Loading.updateWithCompletedTask ctx model.scripts task loadingTreasury of
-                Ok ( updatedLoadingTreasury, outMsg ) ->
-                    ( { model | treasuryManagement = TreasuryLoading updatedLoadingTreasury }, outMsg )
-
-                Err error ->
+            let
+                encounteredLoadingError error =
                     ( { model
                         | treasuryManagement = TreasuryUnspecified
                         , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
                       }
                     , OutMsg ctx.localStateUtxos []
                     )
+            in
+            case Loading.updateWithCompletedTask ctx model.scripts task loadingTreasury of
+                Ok ( updatedLoadingTreasury, { updatedLocalState, runTasks } as outMsg ) ->
+                    case Loading.upgradeIfTreasuryLoadingFinished updatedLocalState updatedLoadingTreasury of
+                        Just ( loadedTreasury, loadedLocalState ) ->
+                            case Loading.doubleCheckTreasuryScriptsHashes loadedTreasury of
+                                Ok _ ->
+                                    ( { model | treasuryManagement = TreasuryFullyLoaded loadedTreasury }, OutMsg loadedLocalState runTasks )
+
+                                Err error ->
+                                    encounteredLoadingError error
+
+                        Nothing ->
+                            ( { model | treasuryManagement = TreasuryLoading updatedLoadingTreasury }, outMsg )
+
+                Err error ->
+                    encounteredLoadingError error
 
         _ ->
             ( model, OutMsg ctx.localStateUtxos [] )

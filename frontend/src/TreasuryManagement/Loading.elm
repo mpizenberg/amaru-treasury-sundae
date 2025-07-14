@@ -581,13 +581,13 @@ setTreasuryUtxos treasuryUtxos scopes =
 -- Upgrade from Loading to Loaded
 
 
-upgradeIfTreasuryLoadingFinished : Utxo.RefDict Output -> LoadingTreasury -> Result LoadingTreasury ( LoadedTreasury, Utxo.RefDict Output )
-upgradeIfTreasuryLoadingFinished localStateUtxos ({ rootUtxo, loadingParams, scopes, contingency } as loadingTreasury) =
+upgradeIfTreasuryLoadingFinished : Utxo.RefDict Output -> LoadingTreasury -> Maybe ( LoadedTreasury, Utxo.RefDict Output )
+upgradeIfTreasuryLoadingFinished localStateUtxos { rootUtxo, loadingParams, scopes, contingency } =
     case ( rootUtxo, upgradeScopesIfLoadingFinished scopes, upgradeScope contingency ) of
         ( RemoteData.Success ( ref, output ), Just loadedScopes, Just contingencyScope ) ->
             -- Upgrade the treasury management
             -- AND the local state utxos
-            Ok
+            Just
                 ( { rootUtxo = ( ref, output )
                   , loadingParams = loadingParams
                   , scopes = loadedScopes
@@ -597,7 +597,7 @@ upgradeIfTreasuryLoadingFinished localStateUtxos ({ rootUtxo, loadingParams, sco
                 )
 
         _ ->
-            Err loadingTreasury
+            Nothing
 
 
 upgradeScopesIfLoadingFinished : Scopes LoadingScope -> Maybe (Scopes Scope)
@@ -651,13 +651,13 @@ addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketi
 --
 
 
-doubleCheckTreasuryScriptsHashes : LoadedTreasury -> Result String LoadedTreasury
+doubleCheckTreasuryScriptsHashes : LoadedTreasury -> Result String ()
 doubleCheckTreasuryScriptsHashes loadedTreasury =
     -- Make sure the scripts hashes obtained from applying the scripts
     -- match the ones obtained from the registry datums
     (Scopes.toList loadedTreasury.scopes ++ [ loadedTreasury.contingency ])
         |> Result.Extra.combineMap doublecheckTreasuryScriptHash
-        |> Result.map (\_ -> loadedTreasury)
+        |> Result.map (\_ -> ())
 
 
 doublecheckTreasuryScriptHash : Scope -> Result String ()
