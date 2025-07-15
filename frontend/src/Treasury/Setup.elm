@@ -1,4 +1,4 @@
-module Treasury.Setup exposing (LastStepParams, SetupTxs, setupAmaruTreasury)
+module Treasury.Setup exposing (LastStepParams, SetupTxs, amaruTreasury)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
@@ -19,7 +19,7 @@ import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
 import Page.SignTx as SignTx
 import Time exposing (Posix)
-import Treasury.Loading exposing (LoadedTreasury)
+import Treasury.Loading exposing (Loaded)
 import Treasury.LoadingParams exposing (LoadingParams)
 import Treasury.Scope as Scope exposing (Scope, Scripts)
 import Treasury.Scopes as Scopes exposing (Scopes)
@@ -49,8 +49,8 @@ type alias SetupTxs =
     }
 
 
-setupAmaruTreasury : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> { expiration : Int, scopeOwners : Scopes MultisigScript } -> Result String ( SetupTxs, LoadedTreasury )
-setupAmaruTreasury localStateUtxos scripts networkId connectedWallet { expiration, scopeOwners } =
+amaruTreasury : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> { expiration : Int, scopeOwners : Scopes MultisigScript } -> Result String ( SetupTxs, Loaded )
+amaruTreasury localStateUtxos scripts networkId connectedWallet { expiration, scopeOwners } =
     setupAmaruScopes localStateUtxos scripts.scopesTrap networkId connectedWallet scopeOwners
         |> Result.andThen
             (\( ( scopesSeedUtxo, setupScopesTx ), ( scopesTrapScriptHash, _ ) ) ->
@@ -99,7 +99,7 @@ setupAmaruTreasury localStateUtxos scripts networkId connectedWallet { expiratio
             )
 
 
-setupLastStep : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> LastStepParams -> Result String ( SetupTxs, LoadedTreasury )
+setupLastStep : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> LastStepParams -> Result String ( SetupTxs, Loaded )
 setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, loadingParams } =
     let
         scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
@@ -238,7 +238,7 @@ setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo,
                                     }
 
                                 loadedTreasuryResult =
-                                    Result.map2 (LoadedTreasury rootUtxo loadingParams)
+                                    Result.map2 (Loaded rootUtxo loadingParams)
                                         (scopesResult registriesTxId txFinalized.tx scopesTreasuries)
                                         (contingencyScopeResult registriesTxId txFinalized.tx contingencyTreasury)
                             in

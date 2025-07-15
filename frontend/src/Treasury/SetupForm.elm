@@ -1,4 +1,4 @@
-module Treasury.SetupForm exposing (Msg(..), SetupForm, SetupFormValidation, ViewContext, init, update, view)
+module Treasury.SetupForm exposing (Msg(..), SetupForm, Validation, ViewContext, init, update, view)
 
 import Bytes.Comparable as Bytes
 import Html exposing (Html, div, text)
@@ -16,11 +16,11 @@ type alias SetupForm =
     , mercenariesOwner : String
     , marketingOwner : String
     , expiration : Int
-    , validation : Maybe SetupFormValidation
+    , validation : Maybe Validation
     }
 
 
-type alias SetupFormValidation =
+type alias Validation =
     Result String { expiration : Int, scopeOwners : Scopes MultisigScript }
 
 
@@ -66,7 +66,7 @@ update msg form =
             { form | validation = Just <| validate form }
 
 
-validate : SetupForm -> SetupFormValidation
+validate : SetupForm -> Validation
 validate form =
     Scopes form.ledgerOwner form.consensusOwner form.mercenariesOwner form.marketingOwner
         |> Scopes.map validateKeyHash

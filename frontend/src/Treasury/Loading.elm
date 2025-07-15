@@ -1,4 +1,4 @@
-module Treasury.Loading exposing (Context, LoadedTreasury, LoadingScope, LoadingTreasury, OutMsg, TaskCompleted(..), doubleCheckTreasuryScriptsHashes, refreshTreasuryUtxos, startTreasuryLoading, updateWithCompletedTask, upgradeIfTreasuryLoadingFinished, viewLoading, viewRootUtxo)
+module Treasury.Loading exposing (Context, Loaded, Loading, LoadingScope, OutMsg, TaskCompleted(..), doubleCheckTreasuryScriptsHashes, refreshUtxos, startLoading, updateWithCompletedTask, upgradeIfTreasuryLoadingFinished, view, viewRootUtxo)
 
 import Api
 import Bytes.Comparable as Bytes exposing (Bytes)
@@ -28,7 +28,7 @@ import Treasury.SundaeTypes as SundaeTypes
 import Utils exposing (spinner)
 
 
-type alias LoadingTreasury =
+type alias Loading =
     { loadingParams : LoadingParams
     , rootUtxo : RemoteData String ( OutputReference, Output )
     , scopes : Scopes LoadingScope
@@ -49,7 +49,7 @@ type alias LoadingScope =
     }
 
 
-type alias LoadedTreasury =
+type alias Loaded =
     { rootUtxo : ( OutputReference, Output )
     , loadingParams : LoadingParams
     , scopes : Scopes Scope
@@ -57,8 +57,8 @@ type alias LoadedTreasury =
     }
 
 
-initLoadingTreasury : Scripts -> LoadingParams.Form -> Result String LoadingTreasury
-initLoadingTreasury unappliedScripts formParams =
+initLoading : Scripts -> LoadingParams.Form -> Result String Loading
+initLoading unappliedScripts formParams =
     LoadingParams.validate formParams
         |> Result.andThen
             (\params ->
@@ -139,8 +139,8 @@ type alias OutMsg =
 -- Init
 
 
-startTreasuryLoading : Context a -> Scripts -> LoadingParams.Form -> Result String ( LoadingTreasury, OutMsg )
-startTreasuryLoading ctx scripts form =
+startLoading : Context a -> Scripts -> LoadingParams.Form -> Result String ( Loading, OutMsg )
+startLoading ctx scripts form =
     let
         loadRegistryUtxosTask : Scopes LoadingScope -> LoadingScope -> ConcurrentTask String TaskCompleted
         loadRegistryUtxosTask loadingScopes contingencyScope =
@@ -199,7 +199,7 @@ startTreasuryLoading ctx scripts form =
             ConcurrentTask.andThen extractLoadedUtxos assetsUtxosTask
                 |> ConcurrentTask.map LoadedRegistryUtxos
     in
-    case initLoadingTreasury scripts form of
+    case initLoading scripts form of
         Ok loadingTreasury ->
             let
                 allPermissionsScriptHashes =
@@ -249,8 +249,8 @@ startTreasuryLoading ctx scripts form =
             Err error
 
 
-refreshTreasuryUtxos : Context a -> LoadedTreasury -> ( LoadingTreasury, OutMsg )
-refreshTreasuryUtxos ctx loadedTreasury =
+refreshUtxos : Context a -> Loaded -> ( Loading, OutMsg )
+refreshUtxos ctx loadedTreasury =
     -- Remove all known UTxOs from the local state
     -- Reset treasury management into the loading state without treasury utxos
     -- Emit the task/command to load all treasury utxos
@@ -339,7 +339,7 @@ type TaskCompleted
     | LoadedPermissionsRefScript (Bytes CredentialHash) (Maybe ( OutputReference, Output ))
 
 
-updateWithCompletedTask : Context a -> Scripts -> TaskCompleted -> LoadingTreasury -> Result String ( LoadingTreasury, OutMsg )
+updateWithCompletedTask : Context a -> Scripts -> TaskCompleted -> Loading -> Result String ( Loading, OutMsg )
 updateWithCompletedTask ctx scripts taskCompleted ({ scopes, contingency } as loadingTreasury) =
     let
         noOutMsg =
@@ -478,7 +478,7 @@ updateWithCompletedTask ctx scripts taskCompleted ({ scopes, contingency } as lo
 {-| Extract the scopes owner config from the root pragma utxo.
 Also apply the Sundae treasuy contracts with the now known paramaters.
 -}
-setPragmaUtxo : PlutusScript -> OutputReference -> Output -> LoadingTreasury -> Result String LoadingTreasury
+setPragmaUtxo : PlutusScript -> OutputReference -> Output -> Loading -> Result String Loading
 setPragmaUtxo unappliedSundaeTreasuryScript ref output ({ contingency } as loading) =
     let
         scopes =
@@ -581,7 +581,7 @@ setTreasuryUtxos treasuryUtxos scopes =
 -- Upgrade from Loading to Loaded
 
 
-upgradeIfTreasuryLoadingFinished : Utxo.RefDict Output -> LoadingTreasury -> Maybe ( LoadedTreasury, Utxo.RefDict Output )
+upgradeIfTreasuryLoadingFinished : Utxo.RefDict Output -> Loading -> Maybe ( Loaded, Utxo.RefDict Output )
 upgradeIfTreasuryLoadingFinished localStateUtxos { rootUtxo, loadingParams, scopes, contingency } =
     case ( rootUtxo, upgradeScopesIfLoadingFinished scopes, upgradeScope contingency ) of
         ( RemoteData.Success ( ref, output ), Just loadedScopes, Just contingencyScope ) ->
@@ -651,7 +651,7 @@ addLoadedUtxos ( rootRef, rootOutput ) { ledger, consensus, mercenaries, marketi
 --
 
 
-doubleCheckTreasuryScriptsHashes : LoadedTreasury -> Result String ()
+doubleCheckTreasuryScriptsHashes : Loaded -> Result String ()
 doubleCheckTreasuryScriptsHashes loadedTreasury =
     -- Make sure the scripts hashes obtained from applying the scripts
     -- match the ones obtained from the registry datums
@@ -698,8 +698,8 @@ doublecheckTreasuryScriptHash { sundaeTreasuryScript, registryUtxo } =
 -- VIEW ##############################################################
 
 
-viewLoading : LoadingTreasury -> Html msg
-viewLoading { rootUtxo, loadingParams, scopes, contingency } =
+view : Loading -> Html msg
+view { rootUtxo, loadingParams, scopes, contingency } =
     div []
         [ Html.p [] [ text "Loading treasury ... ", spinner ]
         , viewLoadingRootUtxo rootUtxo

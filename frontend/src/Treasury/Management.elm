@@ -24,7 +24,7 @@ import Route
 import Task
 import Time exposing (Posix)
 import Treasury.Disburse as Disburse
-import Treasury.Loading as Loading exposing (LoadedTreasury, LoadingTreasury, TaskCompleted, viewRootUtxo)
+import Treasury.Loading as Loading exposing (Loaded, Loading, TaskCompleted, viewRootUtxo)
 import Treasury.LoadingParams as LoadingParams
 import Treasury.Merge as Merge
 import Treasury.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
@@ -62,13 +62,13 @@ type TreasuryManagement
     = TreasuryUnspecified
     | TreasurySetupForm SetupForm
     | TreasurySetupTxs SetupTxsState
-    | TreasuryLoading LoadingTreasury
-    | TreasuryFullyLoaded LoadedTreasury
+    | TreasuryLoading Loading
+    | TreasuryFullyLoaded Loaded
 
 
 type alias SetupTxsState =
     { txs : SetupTxs
-    , treasury : LoadedTreasury
+    , treasury : Loaded
     , tracking :
         { scopes : TxState
         , permissions : TxState
@@ -77,7 +77,7 @@ type alias SetupTxsState =
     }
 
 
-initSetupTxsState : SetupTxs -> LoadedTreasury -> SetupTxsState
+initSetupTxsState : SetupTxs -> Loaded -> SetupTxsState
 initSetupTxsState txs treasury =
     { txs = txs
     , treasury = treasury
@@ -197,7 +197,7 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
             ( { model | treasuryLoadingParamsForm = LoadingParams.updateForm paramsMsg treasuryLoadingParamsForm }, Cmd.none, noOutMsg )
 
         StartTreasuryLoading ->
-            case Loading.startTreasuryLoading ctx model.scripts treasuryLoadingParamsForm of
+            case Loading.startLoading ctx model.scripts treasuryLoadingParamsForm of
                 Ok ( loadingTreasury, outMsg ) ->
                     ( { model | treasuryManagement = TreasuryLoading loadingTreasury, error = Nothing }
                     , Cmd.none
@@ -212,7 +212,7 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
                 TreasuryFullyLoaded loadedTreasury ->
                     let
                         ( loadingTreasury, outMsg ) =
-                            Loading.refreshTreasuryUtxos ctx loadedTreasury
+                            Loading.refreshUtxos ctx loadedTreasury
                     in
                     ( { model | treasuryManagement = TreasuryLoading loadingTreasury }, Cmd.none, outMsg )
 
@@ -250,7 +250,7 @@ handleBuildSetupTxs ctx scripts form =
                     TreasurySetupForm { form | validation = Just <| Err "Please connect wallet first" }
 
                 Just wallet ->
-                    case Treasury.Setup.setupAmaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
+                    case Treasury.Setup.amaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
                         Err error ->
                             TreasurySetupForm { form | validation = Just <| Err error }
 
@@ -662,7 +662,7 @@ viewTreasurySection ctx params treasuryManagement =
             viewSetupTxsState ctx state
 
         TreasuryLoading loadingTreasury ->
-            Loading.viewLoading loadingTreasury
+            Loading.view loadingTreasury
 
         TreasuryFullyLoaded { rootUtxo, loadingParams, scopes, contingency } ->
             let
