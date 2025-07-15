@@ -5,7 +5,7 @@ import AppUrl exposing (AppUrl)
 import Browser
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
-import Cardano.Address as Address exposing (CredentialHash, NetworkId(..))
+import Cardano.Address exposing (CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
 import Cardano.Transaction as Transaction
@@ -14,9 +14,8 @@ import ConcurrentTask
 import ConcurrentTask.Extra
 import Dict
 import Dict.Any
+import Header
 import Html exposing (Html, div, text)
-import Html.Attributes exposing (height, src)
-import Html.Events exposing (onClick)
 import Http
 import Json.Decode as JD
 import List.Extra
@@ -608,10 +607,10 @@ viewHome model =
             updateCtx TreasuryManagementMsg model
     in
     div []
-        [ viewError model.error
-        , viewWalletSection model
+        [ Header.view { connect = ConnectButtonClicked, disconnect = DisconnectWallet } model.discoveredWallets model.connectedWallet
         , viewLocalStateUtxosSection model.localStateUtxos
         , Treasury.Management.view treasuryViewContext model.treasuryManagementModel
+        , viewError model.error
         ]
 
 
@@ -623,52 +622,6 @@ viewError maybeError =
 
         Just error ->
             Html.pre [] [ text <| "ERROR:\n" ++ error ]
-
-
-
--- Wallet
-
-
-viewWalletSection : Model -> Html Msg
-viewWalletSection { discoveredWallets, connectedWallet } =
-    case connectedWallet of
-        Nothing ->
-            div []
-                [ div [] [ text "CIP-30 wallets detected:" ]
-                , viewAvailableWallets discoveredWallets
-                ]
-
-        Just wallet ->
-            viewConnectedWallet wallet
-
-
-viewAvailableWallets : List Cip30.WalletDescriptor -> Html Msg
-viewAvailableWallets wallets =
-    let
-        walletDescription : Cip30.WalletDescriptor -> String
-        walletDescription w =
-            "id: " ++ w.id ++ ", name: " ++ w.name
-
-        walletIcon : Cip30.WalletDescriptor -> Html Msg
-        walletIcon { icon } =
-            Html.img [ src icon, height 32 ] []
-
-        connectButton { id } =
-            Html.button [ onClick (ConnectButtonClicked { id = id }) ] [ text "connect" ]
-
-        walletRow w =
-            div [] [ walletIcon w, text <| walletDescription w ++ " ", connectButton w ]
-    in
-    div [] (List.map walletRow wallets)
-
-
-viewConnectedWallet : Cip30.Wallet -> Html Msg
-viewConnectedWallet wallet =
-    div []
-        [ div [] [ text <| "Wallet: " ++ (Cip30.walletDescriptor wallet).name ]
-        , div [] [ text <| "Address: " ++ (Address.toBech32 <| Cip30.walletChangeAddress wallet) ]
-        , Html.button [ onClick DisconnectWallet ] [ text "Disconnect" ]
-        ]
 
 
 
