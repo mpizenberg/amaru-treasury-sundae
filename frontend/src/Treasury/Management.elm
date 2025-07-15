@@ -29,8 +29,7 @@ import Treasury.LoadingParams as LoadingParams
 import Treasury.Merge as Merge
 import Treasury.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
 import Treasury.Scopes as Scopes
-import Treasury.Setup exposing (SetupTxs)
-import Treasury.SetupForm as SetupForm exposing (SetupForm)
+import Treasury.Setup as Setup exposing (SetupTxs)
 import Utils exposing (viewError)
 
 
@@ -60,7 +59,7 @@ setLoadingParamsForm treasuryLoadingParamsForm model =
 
 type TreasuryManagement
     = TreasuryUnspecified
-    | TreasurySetupForm SetupForm
+    | TreasurySetupForm Setup.Form
     | TreasurySetupTxs SetupTxsState
     | TreasuryLoading Loading
     | TreasuryFullyLoaded Loaded
@@ -121,7 +120,7 @@ type ActionStatus
 type Msg
     = StartTreasurySetup
     | StartTreasurySetupWithCurrentTime Posix
-    | UpdateSetupForm SetupForm.Msg
+    | UpdateSetupForm Setup.Msg
     | TryBuildSetupTxs
     | TreasuryLoadingParamsMsg LoadingParams.Msg
     | StartTreasuryLoading
@@ -180,7 +179,7 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
             )
 
         StartTreasurySetupWithCurrentTime currentTime ->
-            ( { model | treasuryManagement = TreasurySetupForm <| SetupForm.init currentTime }, Cmd.none, noOutMsg )
+            ( { model | treasuryManagement = TreasurySetupForm <| Setup.initForm currentTime }, Cmd.none, noOutMsg )
 
         UpdateSetupForm subMsg ->
             ( handleTreasurySetupFormUpdate subMsg model, Cmd.none, noOutMsg )
@@ -231,17 +230,17 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
             createPublishScriptTx ctx hash script model
 
 
-handleTreasurySetupFormUpdate : SetupForm.Msg -> Model -> Model
+handleTreasurySetupFormUpdate : Setup.Msg -> Model -> Model
 handleTreasurySetupFormUpdate msg model =
     case model.treasuryManagement of
         TreasurySetupForm form ->
-            { model | treasuryManagement = TreasurySetupForm <| SetupForm.update msg form }
+            { model | treasuryManagement = TreasurySetupForm <| Setup.updateForm msg form }
 
         _ ->
             model
 
 
-handleBuildSetupTxs : UpdateContext a msg -> Scripts -> SetupForm -> TreasuryManagement
+handleBuildSetupTxs : UpdateContext a msg -> Scripts -> Setup.Form -> TreasuryManagement
 handleBuildSetupTxs ctx scripts form =
     case form.validation of
         Just (Ok scopeOwners) ->
@@ -250,7 +249,7 @@ handleBuildSetupTxs ctx scripts form =
                     TreasurySetupForm { form | validation = Just <| Err "Please connect wallet first" }
 
                 Just wallet ->
-                    case Treasury.Setup.amaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
+                    case Setup.amaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
                         Err error ->
                             TreasurySetupForm { form | validation = Just <| Err error }
 
@@ -656,7 +655,7 @@ viewTreasurySection ctx params treasuryManagement =
 
         TreasurySetupForm form ->
             Html.map ctx.toMsg <|
-                SetupForm.view { toMsg = UpdateSetupForm, tryBuildSetupTxs = TryBuildSetupTxs } form
+                Setup.viewForm { toMsg = UpdateSetupForm, tryBuildSetupTxs = TryBuildSetupTxs } form
 
         TreasurySetupTxs state ->
             viewSetupTxsState ctx state
