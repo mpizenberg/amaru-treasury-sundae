@@ -7,18 +7,19 @@ import Html.Attributes exposing (height, src)
 import Html.Events exposing (onClick)
 
 
-type alias Context msg =
-    { connect : { id : String } -> msg
-    , disconnect : msg
+type alias Context a msg =
+    { a
+        | connect : { id : String } -> msg
+        , disconnect : msg
     }
 
 
-view : Context msg -> List Cip30.WalletDescriptor -> Maybe Cip30.Wallet -> Html msg
+view : Context a msg -> List Cip30.WalletDescriptor -> Maybe Cip30.Wallet -> Html msg
 view ctx discoveredWallets connectedWallet =
     viewWalletSection ctx discoveredWallets connectedWallet
 
 
-viewWalletSection : Context msg -> List Cip30.WalletDescriptor -> Maybe Cip30.Wallet -> Html msg
+viewWalletSection : Context a msg -> List Cip30.WalletDescriptor -> Maybe Cip30.Wallet -> Html msg
 viewWalletSection ctx discoveredWallets connectedWallet =
     case connectedWallet of
         Nothing ->
@@ -31,7 +32,7 @@ viewWalletSection ctx discoveredWallets connectedWallet =
             viewConnectedWallet ctx wallet
 
 
-viewAvailableWallets : Context msg -> List Cip30.WalletDescriptor -> Html msg
+viewAvailableWallets : Context a msg -> List Cip30.WalletDescriptor -> Html msg
 viewAvailableWallets ctx wallets =
     let
         walletDescription : Cip30.WalletDescriptor -> String
@@ -51,7 +52,7 @@ viewAvailableWallets ctx wallets =
     div [] (List.map walletRow wallets)
 
 
-viewConnectedWallet : Context msg -> Cip30.Wallet -> Html msg
+viewConnectedWallet : Context a msg -> Cip30.Wallet -> Html msg
 viewConnectedWallet ctx wallet =
     div []
         [ div [] [ text <| "Wallet: " ++ (Cip30.walletDescriptor wallet).name ]

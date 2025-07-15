@@ -19,11 +19,14 @@ import Html exposing (Html, div, text)
 import Http
 import Json.Decode as JD
 import List.Extra
+import Page.Home
 import Page.SignTx as SignTx
 import Platform.Cmd as Cmd
 import Result.Extra
 import Route exposing (Route)
 import Storage
+import Task
+import Time exposing (Posix)
 import Treasury.Loading
 import Treasury.LoadingParams as LoadingParams
 import Treasury.Management
@@ -90,6 +93,10 @@ type Msg
       -- Signature page
     | SignTxMsg SignTx.Msg
       -- Treasury management
+    | StartTreasurySetup
+    | StartTreasurySetupWithCurrentTime Posix
+    | StartTreasuryLoading
+    | LoadingParamsMsg LoadingParams.Msg
     | TreasuryManagementMsg Treasury.Management.Msg
       -- Task port
     | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
@@ -115,6 +122,7 @@ type alias Model =
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
+    , treasuryLoadingParamsForm : LoadingParams.Form
     , treasuryManagementModel : Treasury.Management.Model
     , error : Maybe String
     }
@@ -123,7 +131,7 @@ type alias Model =
 initialModel : JD.Value -> Scripts -> Int -> Model
 initialModel db scripts posixTimeMs =
     let
-        treasuryLoadingParams =
+        treasuryLoadingParamsForm =
             { pragmaScriptHash = ""
             , registriesSeedUtxo = { transactionId = "", outputIndex = 0 }
             , treasuryConfigExpiration = posixTimeMs
@@ -139,7 +147,8 @@ initialModel db scripts posixTimeMs =
     , discoveredWallets = []
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
-    , treasuryManagementModel = Treasury.Management.init scripts treasuryLoadingParams
+    , treasuryLoadingParamsForm = treasuryLoadingParamsForm
+    , treasuryManagementModel = Treasury.Management.init scripts
     , error = Nothing
     }
 
@@ -246,7 +255,17 @@ type alias ScriptBlueprint =
 -- UPDATE ############################################################
 
 
-updateCtx : (Treasury.Management.Msg -> Msg) -> Model -> Treasury.Management.UpdateContext {} Msg
+type alias UpdateContext msg =
+    { toMsg : msg -> Msg
+    , routingConfig : Route.Config Msg
+    , db : JD.Value
+    , connectedWallet : Maybe Cip30.Wallet
+    , localStateUtxos : Utxo.RefDict Output
+    , networkId : NetworkId
+    }
+
+
+updateCtx : (msg -> Msg) -> Model -> UpdateContext msg
 updateCtx toMsg model =
     let
         routingConfig =
@@ -264,7 +283,7 @@ updateCtx toMsg model =
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
-update msg model =
+update msg ({ treasuryLoadingParamsForm } as model) =
     case msg of
         NoMsg ->
             ( model, Cmd.none )
@@ -309,26 +328,25 @@ update msg model =
                     ( model, Cmd.none )
 
         -- Treasury management
-        TreasuryManagementMsg pageMsg ->
-            let
-                ( pageModel, pageCmd, { updatedLocalState, runTasks } ) =
-                    Treasury.Management.update (updateCtx TreasuryManagementMsg model) pageMsg model.treasuryManagementModel
-
-                ( updatedTaskPool, tasksCmds ) =
-                    ConcurrentTask.Extra.attemptEach
-                        { pool = model.taskPool
-                        , send = sendTask
-                        , onComplete = OnTaskComplete
-                        }
-                        (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
-            in
-            ( { model
-                | localStateUtxos = updatedLocalState
-                , taskPool = updatedTaskPool
-                , treasuryManagementModel = pageModel
-              }
-            , Cmd.batch (pageCmd :: tasksCmds)
+        StartTreasurySetup ->
+            ( model
+            , Task.perform StartTreasurySetupWithCurrentTime Time.now
             )
+
+        StartTreasurySetupWithCurrentTime currentTime ->
+            ( { model | treasuryManagementModel = Treasury.Management.startSetup currentTime model.treasuryManagementModel }, Cmd.none )
+
+        StartTreasuryLoading ->
+            Treasury.Management.startLoading (updateCtx identity model) model.treasuryLoadingParamsForm model.treasuryManagementModel
+                |> (\( m, o ) -> ( m, Cmd.none, o ))
+                |> updateTreasuryStuff model
+
+        LoadingParamsMsg paramsMsg ->
+            ( { model | treasuryLoadingParamsForm = LoadingParams.updateForm paramsMsg treasuryLoadingParamsForm }, Cmd.none )
+
+        TreasuryManagementMsg pageMsg ->
+            Treasury.Management.update (updateCtx TreasuryManagementMsg model) pageMsg model.treasuryManagementModel
+                |> updateTreasuryStuff model
 
         -- Task port
         OnTaskProgress ( taskPool, cmd ) ->
@@ -336,6 +354,27 @@ update msg model =
 
         OnTaskComplete taskCompleted ->
             handleTask taskCompleted model
+
+
+updateTreasuryStuff : Model -> ( Treasury.Management.Model, Cmd Msg, Treasury.Management.OutMsg ) -> ( Model, Cmd Msg )
+updateTreasuryStuff ({ treasuryLoadingParamsForm } as model) ( treasuryManagementModel, cmds, { updatedLocalState, runTasks, loadingError } ) =
+    let
+        ( updatedTaskPool, tasksCmds ) =
+            ConcurrentTask.Extra.attemptEach
+                { pool = model.taskPool
+                , send = sendTask
+                , onComplete = OnTaskComplete
+                }
+                (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
+    in
+    ( { model
+        | localStateUtxos = updatedLocalState
+        , taskPool = updatedTaskPool
+        , treasuryManagementModel = treasuryManagementModel
+        , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = loadingError }
+      }
+    , Cmd.batch (cmds :: tasksCmds)
+    )
 
 
 
@@ -548,7 +587,7 @@ handleCompletedTask model taskCompleted =
     in
     case taskCompleted of
         ReadLoadingParams (Just paramsForm) ->
-            ( { model | treasuryManagementModel = Treasury.Management.setLoadingParamsForm paramsForm model.treasuryManagementModel }, Cmd.none )
+            ( { model | treasuryLoadingParamsForm = paramsForm }, Cmd.none )
 
         ReadLoadingParams Nothing ->
             ( model, Cmd.none )
@@ -581,35 +620,32 @@ handleCompletedTask model taskCompleted =
 
 view : Model -> Html Msg
 view model =
-    case model.page of
-        Home ->
-            viewHome model
-
-        SignTxPage pageModel ->
-            let
-                viewContext =
-                    { wrapMsg = SignTxMsg
-                    , routingConfig =
-                        { ignoreMsg = \_ -> NoMsg
-                        , urlChangedMsg = UrlChanged
-                        }
-                    , wallet = model.connectedWallet
-                    , networkId = model.networkId
-                    }
-            in
-            SignTx.view viewContext pageModel
-
-
-viewHome : Model -> Html Msg
-viewHome model =
-    let
-        treasuryViewContext =
-            updateCtx TreasuryManagementMsg model
-    in
     div []
         [ Header.view { connect = ConnectButtonClicked, disconnect = DisconnectWallet } model.discoveredWallets model.connectedWallet
         , viewLocalStateUtxosSection model.localStateUtxos
-        , Treasury.Management.view treasuryViewContext model.treasuryManagementModel
+        , case model.page of
+            Home ->
+                Page.Home.view
+                    { startTreasurySetup = StartTreasurySetup
+                    , startTreasuryLoading = StartTreasuryLoading
+                    , loadingParamsMsg = LoadingParamsMsg
+                    }
+                    model.treasuryLoadingParamsForm
+
+            -- TODO: split treasury management pages
+            SignTxPage pageModel ->
+                let
+                    viewContext =
+                        { wrapMsg = SignTxMsg
+                        , routingConfig =
+                            { ignoreMsg = \_ -> NoMsg
+                            , urlChangedMsg = UrlChanged
+                            }
+                        , wallet = model.connectedWallet
+                        , networkId = model.networkId
+                        }
+                in
+                SignTx.view viewContext pageModel
         , viewError model.error
         ]
 

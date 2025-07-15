@@ -1,4 +1,4 @@
-module Treasury.Management exposing (ActionStatus(..), Model, Msg(..), OutMsg, ScopeActionState, SetupTxsState, TreasuryAction(..), TreasuryDisburseMsg(..), TreasuryManagement(..), TreasuryMergingMsg(..), TxState(..), UpdateContext, ViewContext, handleCompletedLoadingTask, init, setLoadingParamsForm, update, updateWithTx, view)
+module Treasury.Management exposing (ActionStatus(..), Model, Msg(..), OutMsg, ScopeActionState, SetupTxsState, TreasuryAction(..), TreasuryDisburseMsg(..), TreasuryManagement(..), TreasuryMergingMsg(..), TxState(..), UpdateContext, ViewContext, handleCompletedLoadingTask, init, startLoading, startSetup, update, updateWithTx, view)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
@@ -30,31 +30,23 @@ import Treasury.Merge as Merge
 import Treasury.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
 import Treasury.Scopes as Scopes
 import Treasury.Setup as Setup exposing (SetupTxs)
-import Utils exposing (viewError)
 
 
 type alias Model =
-    { treasuryLoadingParamsForm : LoadingParams.Form
-    , treasuryManagement : TreasuryManagement
+    { treasuryManagement : TreasuryManagement
     , treasuryAction : TreasuryAction
     , scripts : Scripts
     , error : Maybe String
     }
 
 
-init : Scripts -> LoadingParams.Form -> Model
-init scripts treasuryLoadingParamsForm =
-    { treasuryLoadingParamsForm = treasuryLoadingParamsForm
-    , treasuryManagement = TreasuryUnspecified
+init : Scripts -> Model
+init scripts =
+    { treasuryManagement = TreasuryUnspecified
     , treasuryAction = NoTreasuryAction
     , scripts = scripts
     , error = Nothing
     }
-
-
-setLoadingParamsForm : LoadingParams.Form -> Model -> Model
-setLoadingParamsForm treasuryLoadingParamsForm model =
-    { model | treasuryLoadingParamsForm = treasuryLoadingParamsForm }
 
 
 type TreasuryManagement
@@ -63,6 +55,25 @@ type TreasuryManagement
     | TreasurySetupTxs SetupTxsState
     | TreasuryLoading Loading
     | TreasuryFullyLoaded Loaded
+
+
+startSetup : Posix -> Model -> Model
+startSetup currentTime model =
+    { model | treasuryManagement = TreasurySetupForm <| Setup.initForm currentTime }
+
+
+startLoading : Loading.Context a -> LoadingParams.Form -> Model -> ( Model, OutMsg )
+startLoading ctx form model =
+    case Loading.startLoading ctx model.scripts form of
+        Ok ( loadingTreasury, { updatedLocalState, runTasks } ) ->
+            ( { model | treasuryManagement = TreasuryLoading loadingTreasury, error = Nothing }
+            , OutMsg updatedLocalState runTasks Nothing
+            )
+
+        Err error ->
+            ( { model | treasuryManagement = TreasuryUnspecified, error = Nothing }
+            , OutMsg ctx.localStateUtxos [] (Just error)
+            )
 
 
 type alias SetupTxsState =
@@ -118,12 +129,8 @@ type ActionStatus
 
 
 type Msg
-    = StartTreasurySetup
-    | StartTreasurySetupWithCurrentTime Posix
-    | UpdateSetupForm Setup.Msg
+    = UpdateSetupForm Setup.Msg
     | TryBuildSetupTxs
-    | TreasuryLoadingParamsMsg LoadingParams.Msg
-    | StartTreasuryLoading
     | RefreshTreasuryUtxos
     | TreasuryMergingMsg TreasuryMergingMsg
     | TreasuryDisburseMsg TreasuryDisburseMsg
@@ -160,27 +167,20 @@ type alias UpdateContext a msg =
 type alias OutMsg =
     { updatedLocalState : Utxo.RefDict Output
     , runTasks : List (ConcurrentTask String TaskCompleted)
+    , loadingError : Maybe String
     }
 
 
 update : UpdateContext a msg -> Msg -> Model -> ( Model, Cmd msg, OutMsg )
-update ctx msg ({ treasuryLoadingParamsForm } as model) =
+update ctx msg model =
     let
         noOutMsg =
             { updatedLocalState = ctx.localStateUtxos
             , runTasks = []
+            , loadingError = Nothing
             }
     in
     case msg of
-        StartTreasurySetup ->
-            ( model
-            , Task.perform (ctx.toMsg << StartTreasurySetupWithCurrentTime) Time.now
-            , noOutMsg
-            )
-
-        StartTreasurySetupWithCurrentTime currentTime ->
-            ( { model | treasuryManagement = TreasurySetupForm <| Setup.initForm currentTime }, Cmd.none, noOutMsg )
-
         UpdateSetupForm subMsg ->
             ( handleTreasurySetupFormUpdate subMsg model, Cmd.none, noOutMsg )
 
@@ -192,28 +192,17 @@ update ctx msg ({ treasuryLoadingParamsForm } as model) =
                 _ ->
                     ( model, Cmd.none, noOutMsg )
 
-        TreasuryLoadingParamsMsg paramsMsg ->
-            ( { model | treasuryLoadingParamsForm = LoadingParams.updateForm paramsMsg treasuryLoadingParamsForm }, Cmd.none, noOutMsg )
-
-        StartTreasuryLoading ->
-            case Loading.startLoading ctx model.scripts treasuryLoadingParamsForm of
-                Ok ( loadingTreasury, outMsg ) ->
-                    ( { model | treasuryManagement = TreasuryLoading loadingTreasury, error = Nothing }
-                    , Cmd.none
-                    , outMsg
-                    )
-
-                Err error ->
-                    ( { model | treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error } }, Cmd.none, noOutMsg )
-
         RefreshTreasuryUtxos ->
             case model.treasuryManagement of
                 TreasuryFullyLoaded loadedTreasury ->
                     let
-                        ( loadingTreasury, outMsg ) =
+                        ( loadingTreasury, { updatedLocalState, runTasks } ) =
                             Loading.refreshUtxos ctx loadedTreasury
                     in
-                    ( { model | treasuryManagement = TreasuryLoading loadingTreasury }, Cmd.none, outMsg )
+                    ( { model | treasuryManagement = TreasuryLoading loadingTreasury }
+                    , Cmd.none
+                    , OutMsg updatedLocalState runTasks Nothing
+                    )
 
                 _ ->
                     ( model, Cmd.none, noOutMsg )
@@ -415,7 +404,7 @@ createPublishScriptTx : UpdateContext a msg -> Bytes CredentialHash -> PlutusScr
 createPublishScriptTx ctx _ script model =
     let
         noOutMsg =
-            OutMsg ctx.localStateUtxos []
+            OutMsg ctx.localStateUtxos [] Nothing
     in
     case ctx.connectedWallet of
         Nothing ->
@@ -480,7 +469,7 @@ updateWithTx : Utxo.RefDict Output -> Maybe { a | txId : Bytes TransactionId, tx
 updateWithTx localStateUtxos maybeTx ({ treasuryManagement, treasuryAction } as model) =
     case maybeTx of
         Nothing ->
-            ( model, OutMsg localStateUtxos [] )
+            ( model, OutMsg localStateUtxos [] Nothing )
 
         Just { txId, tx } ->
             let
@@ -495,7 +484,7 @@ updateWithTx localStateUtxos maybeTx ({ treasuryManagement, treasuryAction } as 
                                 |> upgradeToLoadedIfSetupIsDone
                         , treasuryAction = updateTreasuryActionWithTx txId treasuryAction
                       }
-                    , OutMsg updatedLocalState []
+                    , OutMsg updatedLocalState [] Nothing
                     )
 
                 TreasuryFullyLoaded loadedTreasury ->
@@ -505,13 +494,13 @@ updateWithTx localStateUtxos maybeTx ({ treasuryManagement, treasuryAction } as 
                             TreasuryFullyLoaded loadedTreasury
                         , treasuryAction = updateTreasuryActionWithTx txId treasuryAction
                       }
-                    , OutMsg updatedLocalState []
+                    , OutMsg updatedLocalState [] Nothing
                     )
 
                 -- No other management state should trigger a Tx.
                 -- We just update the local state in case it’s a Tx unrelated to treasury management.
                 _ ->
-                    ( model, OutMsg updatedLocalState [] )
+                    ( model, OutMsg updatedLocalState [] Nothing )
 
 
 markTxAsSubmitted : Bytes TransactionId -> SetupTxsState -> SetupTxsState
@@ -576,37 +565,38 @@ updateTreasuryActionWithTx txId treasuryAction =
 
 
 handleCompletedLoadingTask : UpdateContext a msg -> Loading.TaskCompleted -> Model -> ( Model, OutMsg )
-handleCompletedLoadingTask ctx task ({ treasuryLoadingParamsForm } as model) =
+handleCompletedLoadingTask ctx task model =
     case model.treasuryManagement of
         TreasuryLoading loadingTreasury ->
             let
                 encounteredLoadingError error =
-                    ( { model
-                        | treasuryManagement = TreasuryUnspecified
-                        , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
-                      }
-                    , OutMsg ctx.localStateUtxos []
+                    ( { model | treasuryManagement = TreasuryUnspecified }
+                    , OutMsg ctx.localStateUtxos [] (Just error)
                     )
             in
             case Loading.updateWithCompletedTask ctx model.scripts task loadingTreasury of
-                Ok ( updatedLoadingTreasury, { updatedLocalState, runTasks } as outMsg ) ->
+                Ok ( updatedLoadingTreasury, { updatedLocalState, runTasks } ) ->
                     case Loading.upgradeIfTreasuryLoadingFinished updatedLocalState updatedLoadingTreasury of
                         Just ( loadedTreasury, loadedLocalState ) ->
                             case Loading.doubleCheckTreasuryScriptsHashes loadedTreasury of
                                 Ok _ ->
-                                    ( { model | treasuryManagement = TreasuryFullyLoaded loadedTreasury }, OutMsg loadedLocalState runTasks )
+                                    ( { model | treasuryManagement = TreasuryFullyLoaded loadedTreasury }
+                                    , OutMsg loadedLocalState runTasks Nothing
+                                    )
 
                                 Err error ->
                                     encounteredLoadingError error
 
                         Nothing ->
-                            ( { model | treasuryManagement = TreasuryLoading updatedLoadingTreasury }, outMsg )
+                            ( { model | treasuryManagement = TreasuryLoading updatedLoadingTreasury }
+                            , OutMsg updatedLocalState runTasks Nothing
+                            )
 
                 Err error ->
                     encounteredLoadingError error
 
         _ ->
-            ( model, OutMsg ctx.localStateUtxos [] )
+            ( model, OutMsg ctx.localStateUtxos [] Nothing )
 
 
 
@@ -626,7 +616,7 @@ view : ViewContext a msg -> Model -> Html msg
 view ctx model =
     case model.treasuryAction of
         NoTreasuryAction ->
-            viewTreasurySection ctx model.treasuryLoadingParamsForm model.treasuryManagement
+            viewTreasurySection ctx model.treasuryManagement
 
         MergeTreasuryUtxos mergeState ->
             viewMergeUtxosAction ctx mergeState
@@ -635,23 +625,11 @@ view ctx model =
             viewDisburseAction ctx disburseState form
 
 
-viewTreasurySection : ViewContext a msg -> LoadingParams.Form -> TreasuryManagement -> Html msg
-viewTreasurySection ctx params treasuryManagement =
+viewTreasurySection : ViewContext a msg -> TreasuryManagement -> Html msg
+viewTreasurySection ctx treasuryManagement =
     case treasuryManagement of
         TreasuryUnspecified ->
-            Html.map ctx.toMsg <|
-                div []
-                    [ Html.h2 [] [ Html.text "Setup a new treasury" ]
-                    , Html.button [ onClick StartTreasurySetup ]
-                        [ text "Setup a new treasury" ]
-                    , Html.h2 [] [ Html.text "Load an existing treasury" ]
-                    , Html.p [] [ text "With the following parameters:" ]
-                    , Html.map TreasuryLoadingParamsMsg <|
-                        LoadingParams.viewForm params
-                    , Html.button [ onClick StartTreasuryLoading ]
-                        [ text "Load treasury" ]
-                    , viewError params.error
-                    ]
+            text "Treasury unspecified, please go back to home page to pick an initialization method"
 
         TreasurySetupForm form ->
             Html.map ctx.toMsg <|
