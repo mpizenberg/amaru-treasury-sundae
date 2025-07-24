@@ -127,7 +127,7 @@ type alias Model =
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
     , scripts : Scripts
-    , treasuryLoadingParamsForm : LoadingParams.Form
+    , loadingForm : LoadingParams.Form
     , error : Maybe String
     }
 
@@ -152,7 +152,7 @@ initialModel db scripts posixTimeMs =
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
     , scripts = scripts
-    , treasuryLoadingParamsForm = treasuryLoadingParamsForm
+    , loadingForm = treasuryLoadingParamsForm
     , error = Nothing
     }
 
@@ -290,7 +290,7 @@ updateCtx toMsg model =
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
-update msg ({ treasuryLoadingParamsForm } as model) =
+update msg ({ loadingForm } as model) =
     case msg of
         NoMsg ->
             ( model, Cmd.none )
@@ -360,7 +360,7 @@ update msg ({ treasuryLoadingParamsForm } as model) =
                     ( model, Cmd.none )
 
         StartTreasuryLoading ->
-            case Loading.startLoading (updateCtx identity model) model.scripts model.treasuryLoadingParamsForm of
+            case Loading.startLoading (updateCtx identity model) model.scripts model.loadingForm of
                 Ok ( loading, { updatedLocalState, runTasks } ) ->
                     { model
                         | localStateUtxos = updatedLocalState
@@ -371,13 +371,13 @@ update msg ({ treasuryLoadingParamsForm } as model) =
                 Err error ->
                     ( { model
                         | page = HomePage
-                        , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
+                        , loadingForm = { loadingForm | error = Just error }
                       }
                     , Cmd.none
                     )
 
         LoadingParamsMsg paramsMsg ->
-            ( { model | treasuryLoadingParamsForm = LoadingParams.updateForm paramsMsg treasuryLoadingParamsForm }, Cmd.none )
+            ( { model | loadingForm = LoadingParams.updateForm paramsMsg loadingForm }, Cmd.none )
 
         TreasuryMsg pageMsg ->
             handleTreasuryMsg pageMsg model
@@ -645,7 +645,7 @@ handleCompletedTask : Model -> TaskCompleted -> ( Model, Cmd Msg )
 handleCompletedTask model taskCompleted =
     case ( taskCompleted, model.page ) of
         ( ReadLoadingParams (Just paramsForm), _ ) ->
-            ( { model | treasuryLoadingParamsForm = paramsForm }, Cmd.none )
+            ( { model | loadingForm = paramsForm }, Cmd.none )
 
         ( TreasuryLoadingTask subTask, LoadingPage loading ) ->
             handleCompletedLoadingTask subTask loading model
@@ -655,12 +655,12 @@ handleCompletedTask model taskCompleted =
 
 
 handleCompletedLoadingTask : Loading.TaskCompleted -> Loading -> Model -> ( Model, Cmd Msg )
-handleCompletedLoadingTask task loading ({ treasuryLoadingParamsForm } as model) =
+handleCompletedLoadingTask task loading ({ loadingForm } as model) =
     let
         encounteredLoadingError error =
             ( { model
                 | page = HomePage
-                , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
+                , loadingForm = { loadingForm | error = Just error }
               }
             , Cmd.none
             )
@@ -735,7 +735,7 @@ view model =
                     , startTreasuryLoading = StartTreasuryLoading
                     , loadingParamsMsg = LoadingParamsMsg
                     }
-                    model.treasuryLoadingParamsForm
+                    model.loadingForm
 
             SetupPage pageModel ->
                 Setup.view (ctx SetupMsg) pageModel
