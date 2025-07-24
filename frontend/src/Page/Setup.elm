@@ -1,4 +1,4 @@
-module Page.Setup exposing (Model, Msg, init, update, updateWithTx, view)
+module Page.Setup exposing (Context, Model, Msg, ViewContext, init, isDone, update, updateWithTx, view)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
@@ -111,14 +111,19 @@ initTxsState txs treasury =
     }
 
 
-isDone : TxsState -> Maybe Loaded
-isDone ({ tracking } as state) =
-    case ( tracking.scopes, tracking.permissions, tracking.registries ) of
-        ( TxSubmitted, TxSubmitted, TxSubmitted ) ->
-            Just state.treasury
-
-        _ ->
+isDone : Model -> Maybe Loaded
+isDone model =
+    case model of
+        SetupForm _ ->
             Nothing
+
+        SetupExec ({ tracking } as state) ->
+            case ( tracking.scopes, tracking.permissions, tracking.registries ) of
+                ( TxSubmitted, TxSubmitted, TxSubmitted ) ->
+                    Just state.treasury
+
+                _ ->
+                    Nothing
 
 
 

@@ -1,11 +1,11 @@
-module Page.Treasury exposing (Model, Msg, UpdateContext, ViewContext, init, update, updateWithTx, view)
+module Page.Treasury exposing (Action, Model, Msg, UpdateContext, ViewContext, init, update, updateWithTx, view)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map
 import Cardano.Address as Address exposing (CredentialHash, NetworkId)
 import Cardano.Cip30 as Cip30
 import Cardano.Script as Script exposing (NativeScript(..), PlutusScript)
-import Cardano.Transaction as Transaction exposing (Transaction)
+import Cardano.Transaction as Transaction
 import Cardano.TxExamples exposing (prettyTx)
 import Cardano.TxIntent as TxIntent exposing (TxFinalized)
 import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId)

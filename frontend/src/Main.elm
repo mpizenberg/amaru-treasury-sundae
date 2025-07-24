@@ -347,7 +347,14 @@ update msg ({ treasuryLoadingParamsForm } as model) =
             case model.page of
                 SetupPage pageModel ->
                     Setup.update (updateCtx SetupMsg model) model.scripts pageMsg pageModel
-                        |> (\newPageModel -> ( { model | page = SetupPage newPageModel }, Cmd.none ))
+                        |> (\newPageModel ->
+                                case Setup.isDone newPageModel of
+                                    Nothing ->
+                                        ( { model | page = SetupPage newPageModel }, Cmd.none )
+
+                                    Just loaded ->
+                                        ( { model | page = TreasuryPage <| Treasury.init model.scripts loaded }, Cmd.none )
+                           )
 
                 _ ->
                     ( model, Cmd.none )
@@ -739,8 +746,7 @@ view model =
             TreasuryPage pageModel ->
                 Treasury.view (ctx TreasuryMsg) pageModel
 
-            -- TODO: split treasury management pages
-            SignTxPage previousPage pageModel ->
+            SignTxPage _ pageModel ->
                 let
                     viewContext =
                         { wrapMsg = SignTxMsg
