@@ -8,9 +8,10 @@ import Bytes.Map
 import Cardano.Address exposing (CredentialHash, NetworkId(..))
 import Cardano.Cip30 as Cip30
 import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
-import Cardano.Transaction as Transaction
-import Cardano.Utxo as Utxo exposing (Output)
-import ConcurrentTask
+import Cardano.Transaction as Transaction exposing (Transaction)
+import Cardano.TxIntent as TxIntent
+import Cardano.Utxo as Utxo exposing (Output, TransactionId)
+import ConcurrentTask exposing (ConcurrentTask)
 import ConcurrentTask.Extra
 import Dict
 import Dict.Any
@@ -20,16 +21,17 @@ import Http
 import Json.Decode as JD
 import List.Extra
 import Page.Home
+import Page.Loading as Loading exposing (Loaded, Loading)
+import Page.Setup as Setup
 import Page.SignTx as SignTx
+import Page.Treasury as Treasury
 import Platform.Cmd as Cmd
 import Result.Extra
 import Route exposing (Route)
 import Storage
 import Task
 import Time exposing (Posix)
-import Treasury.Loading
 import Treasury.LoadingParams as LoadingParams
-import Treasury.Management
 import Treasury.Scope exposing (Scripts)
 
 
@@ -95,9 +97,11 @@ type Msg
       -- Treasury management
     | StartTreasurySetup
     | StartTreasurySetupWithCurrentTime Posix
+    | SetupMsg Setup.Msg
     | StartTreasuryLoading
     | LoadingParamsMsg LoadingParams.Msg
-    | TreasuryManagementMsg Treasury.Management.Msg
+    | TreasuryMsg Treasury.Msg
+    | RefreshUtxos Loaded
       -- Task port
     | OnTaskProgress ( ConcurrentTask.Pool Msg String TaskCompleted, Cmd Msg )
     | OnTaskComplete (ConcurrentTask.Response String TaskCompleted)
@@ -105,7 +109,7 @@ type Msg
 
 type TaskCompleted
     = ReadLoadingParams (Maybe LoadingParams.Form)
-    | TreasuryLoadingTask Treasury.Loading.TaskCompleted
+    | TreasuryLoadingTask Loading.TaskCompleted
 
 
 
@@ -122,8 +126,8 @@ type alias Model =
     , discoveredWallets : List Cip30.WalletDescriptor
     , connectedWallet : Maybe Cip30.Wallet
     , localStateUtxos : Utxo.RefDict Output
+    , scripts : Scripts
     , treasuryLoadingParamsForm : LoadingParams.Form
-    , treasuryManagementModel : Treasury.Management.Model
     , error : Maybe String
     }
 
@@ -140,22 +144,25 @@ initialModel db scripts posixTimeMs =
     in
     { taskPool = ConcurrentTask.pool
     , db = db
-    , page = Home
+    , page = HomePage
     , appUrl = Route.toAppUrl Route.Home
     , networkId = Testnet
     , protocolParams = Api.defaultProtocolParams
     , discoveredWallets = []
     , connectedWallet = Nothing
     , localStateUtxos = Utxo.emptyRefDict
+    , scripts = scripts
     , treasuryLoadingParamsForm = treasuryLoadingParamsForm
-    , treasuryManagementModel = Treasury.Management.init scripts
     , error = Nothing
     }
 
 
 type Page
-    = Home
-    | SignTxPage SignTx.Model
+    = HomePage
+    | SetupPage Setup.Model
+    | LoadingPage Loading
+    | TreasuryPage Treasury.Model
+    | SignTxPage { previousPage : Page } SignTx.Model
 
 
 init : Flags -> ( Model, Cmd Msg )
@@ -321,8 +328,8 @@ update msg ({ treasuryLoadingParamsForm } as model) =
         -- Signature page
         SignTxMsg pageMsg ->
             case model.page of
-                SignTxPage pageModel ->
-                    handleSignTxMsg pageModel pageMsg model
+                SignTxPage previousPage pageModel ->
+                    handleSignTxMsg previousPage pageModel pageMsg model
 
                 _ ->
                     ( model, Cmd.none )
@@ -334,19 +341,50 @@ update msg ({ treasuryLoadingParamsForm } as model) =
             )
 
         StartTreasurySetupWithCurrentTime currentTime ->
-            ( { model | treasuryManagementModel = Treasury.Management.startSetup currentTime model.treasuryManagementModel }, Cmd.none )
+            ( { model | page = SetupPage <| Setup.init currentTime }, Cmd.none )
+
+        SetupMsg pageMsg ->
+            case model.page of
+                SetupPage pageModel ->
+                    Setup.update (updateCtx SetupMsg model) model.scripts pageMsg pageModel
+                        |> (\newPageModel -> ( { model | page = SetupPage newPageModel }, Cmd.none ))
+
+                _ ->
+                    ( model, Cmd.none )
 
         StartTreasuryLoading ->
-            Treasury.Management.startLoading (updateCtx identity model) model.treasuryLoadingParamsForm model.treasuryManagementModel
-                |> (\( m, o ) -> ( m, Cmd.none, o ))
-                |> updateTreasuryStuff model
+            case Loading.startLoading (updateCtx identity model) model.scripts model.treasuryLoadingParamsForm of
+                Ok ( loading, { updatedLocalState, runTasks } ) ->
+                    { model
+                        | localStateUtxos = updatedLocalState
+                        , page = LoadingPage loading
+                    }
+                        |> withTasks (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
+
+                Err error ->
+                    ( { model
+                        | page = HomePage
+                        , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
+                      }
+                    , Cmd.none
+                    )
 
         LoadingParamsMsg paramsMsg ->
             ( { model | treasuryLoadingParamsForm = LoadingParams.updateForm paramsMsg treasuryLoadingParamsForm }, Cmd.none )
 
-        TreasuryManagementMsg pageMsg ->
-            Treasury.Management.update (updateCtx TreasuryManagementMsg model) pageMsg model.treasuryManagementModel
-                |> updateTreasuryStuff model
+        TreasuryMsg pageMsg ->
+            handleTreasuryMsg pageMsg model
+
+        RefreshUtxos loaded ->
+            let
+                ( loading, { updatedLocalState, runTasks } ) =
+                    Loading.refreshUtxos (updateCtx identity model) loaded
+            in
+            { model
+                | localStateUtxos = updatedLocalState
+                , page = LoadingPage loading
+            }
+                |> withTasks (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
 
         -- Task port
         OnTaskProgress ( taskPool, cmd ) ->
@@ -356,25 +394,15 @@ update msg ({ treasuryLoadingParamsForm } as model) =
             handleTask taskCompleted model
 
 
-updateTreasuryStuff : Model -> ( Treasury.Management.Model, Cmd Msg, Treasury.Management.OutMsg ) -> ( Model, Cmd Msg )
-updateTreasuryStuff ({ treasuryLoadingParamsForm } as model) ( treasuryManagementModel, cmds, { updatedLocalState, runTasks, loadingError } ) =
-    let
-        ( updatedTaskPool, tasksCmds ) =
-            ConcurrentTask.Extra.attemptEach
-                { pool = model.taskPool
-                , send = sendTask
-                , onComplete = OnTaskComplete
-                }
-                (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
-    in
-    ( { model
-        | localStateUtxos = updatedLocalState
-        , taskPool = updatedTaskPool
-        , treasuryManagementModel = treasuryManagementModel
-        , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = loadingError }
-      }
-    , Cmd.batch (cmds :: tasksCmds)
-    )
+handleTreasuryMsg : Treasury.Msg -> Model -> ( Model, Cmd Msg )
+handleTreasuryMsg pageMsg model =
+    case model.page of
+        TreasuryPage pageModel ->
+            Treasury.update (updateCtx TreasuryMsg model) pageMsg pageModel
+                |> Tuple.mapFirst (\newPageModel -> { model | page = TreasuryPage newPageModel })
+
+        _ ->
+            ( model, Cmd.none )
 
 
 
@@ -401,7 +429,7 @@ handleUrlChange route model =
         Route.Home ->
             ( { model
                 | error = Nothing
-                , page = Home
+                , page = HomePage
                 , appUrl = appUrl
               }
             , pushUrlCmd
@@ -426,7 +454,7 @@ handleUrlChange route model =
             in
             ( { model
                 | error = Nothing
-                , page = SignTxPage <| SignTx.initialModel subject prep
+                , page = SignTxPage { previousPage = model.page } <| SignTx.initialModel subject prep
                 , appUrl = appUrl
               }
             , pushUrlCmd
@@ -465,8 +493,8 @@ handleWalletMsg value model =
         -- The wallet just signed a Tx
         Ok (Cip30.ApiResponse _ (Cip30.SignedTx vkeyWitnesses)) ->
             case model.page of
-                SignTxPage pageModel ->
-                    ( { model | page = SignTxPage <| SignTx.addWalletSignatures vkeyWitnesses pageModel }
+                SignTxPage previousPage pageModel ->
+                    ( { model | page = SignTxPage previousPage <| SignTx.addWalletSignatures vkeyWitnesses pageModel }
                     , Cmd.none
                     )
 
@@ -477,15 +505,14 @@ handleWalletMsg value model =
         -- The wallet just submitted a Tx
         Ok (Cip30.ApiResponse _ (Cip30.SubmittedTx txId)) ->
             case model.page of
-                SignTxPage pageModel ->
+                SignTxPage { previousPage } pageModel ->
                     let
-                        ( updatedTreasuryManagementModel, { updatedLocalState } ) =
-                            Treasury.Management.updateWithTx model.localStateUtxos (SignTx.getTxInfo pageModel) model.treasuryManagementModel
+                        ( updatedPreviousPage, updatedLocalState ) =
+                            updatePageWithTx (SignTx.getTxInfo pageModel) model.localStateUtxos previousPage
                     in
                     ( { model
-                        | page = SignTxPage <| SignTx.recordSubmittedTx txId pageModel
+                        | page = SignTxPage { previousPage = updatedPreviousPage } <| SignTx.recordSubmittedTx txId pageModel
                         , localStateUtxos = updatedLocalState
-                        , treasuryManagementModel = updatedTreasuryManagementModel
                       }
                     , Cmd.none
                     )
@@ -520,13 +547,41 @@ handleWalletMsg value model =
             )
 
 
+updatePageWithTx : Maybe { txId : Bytes TransactionId, tx : Transaction } -> Utxo.RefDict Output -> Page -> ( Page, Utxo.RefDict Output )
+updatePageWithTx maybeTx localStateUtxos page =
+    case maybeTx of
+        Just { txId, tx } ->
+            let
+                { updatedState } =
+                    TxIntent.updateLocalState txId tx localStateUtxos
+            in
+            case page of
+                HomePage ->
+                    ( page, updatedState )
+
+                SetupPage pageModel ->
+                    ( SetupPage <| Setup.updateWithTx txId pageModel, updatedState )
+
+                LoadingPage _ ->
+                    ( page, updatedState )
+
+                TreasuryPage pageModel ->
+                    ( TreasuryPage <| Treasury.updateWithTx txId pageModel, updatedState )
+
+                SignTxPage _ _ ->
+                    ( page, updatedState )
+
+        Nothing ->
+            ( page, localStateUtxos )
+
+
 {-| Helper function to reset the signing step of the Preparation.
 -}
 resetSigningStep : String -> Page -> Page
 resetSigningStep error page =
     case page of
-        SignTxPage pageModel ->
-            SignTxPage <| SignTx.resetSubmission error pageModel
+        SignTxPage previousPage pageModel ->
+            SignTxPage previousPage <| SignTx.resetSubmission error pageModel
 
         _ ->
             page
@@ -536,8 +591,8 @@ resetSigningStep error page =
 -- Signature page
 
 
-handleSignTxMsg : SignTx.Model -> SignTx.Msg -> Model -> ( Model, Cmd Msg )
-handleSignTxMsg pageModel msg model =
+handleSignTxMsg : { previousPage : Page } -> SignTx.Model -> SignTx.Msg -> Model -> ( Model, Cmd Msg )
+handleSignTxMsg previousPage pageModel msg model =
     let
         ( walletSignTx, walletSubmitTx ) =
             case model.connectedWallet of
@@ -559,7 +614,7 @@ handleSignTxMsg pageModel msg model =
             }
     in
     SignTx.update ctx msg pageModel
-        |> Tuple.mapFirst (\newPageModel -> { model | page = SignTxPage newPageModel })
+        |> Tuple.mapFirst (\newPageModel -> { model | page = SignTxPage previousPage newPageModel })
 
 
 
@@ -581,37 +636,68 @@ handleTask response model =
 
 handleCompletedTask : Model -> TaskCompleted -> ( Model, Cmd Msg )
 handleCompletedTask model taskCompleted =
-    let
-        ctx =
-            updateCtx TreasuryManagementMsg model
-    in
-    case taskCompleted of
-        ReadLoadingParams (Just paramsForm) ->
+    case ( taskCompleted, model.page ) of
+        ( ReadLoadingParams (Just paramsForm), _ ) ->
             ( { model | treasuryLoadingParamsForm = paramsForm }, Cmd.none )
 
-        ReadLoadingParams Nothing ->
+        ( TreasuryLoadingTask subTask, LoadingPage loading ) ->
+            handleCompletedLoadingTask subTask loading model
+
+        _ ->
             ( model, Cmd.none )
 
-        TreasuryLoadingTask subTask ->
-            let
-                ( subModel, { updatedLocalState, runTasks } ) =
-                    Treasury.Management.handleCompletedLoadingTask ctx subTask model.treasuryManagementModel
 
-                ( updatedTaskPool, tasksCmds ) =
-                    ConcurrentTask.Extra.attemptEach
-                        { pool = model.taskPool
-                        , send = sendTask
-                        , onComplete = OnTaskComplete
-                        }
-                        (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
-            in
+handleCompletedLoadingTask : Loading.TaskCompleted -> Loading -> Model -> ( Model, Cmd Msg )
+handleCompletedLoadingTask task loading ({ treasuryLoadingParamsForm } as model) =
+    let
+        encounteredLoadingError error =
             ( { model
-                | localStateUtxos = updatedLocalState
-                , taskPool = updatedTaskPool
-                , treasuryManagementModel = subModel
+                | page = HomePage
+                , treasuryLoadingParamsForm = { treasuryLoadingParamsForm | error = Just error }
               }
-            , Cmd.batch tasksCmds
+            , Cmd.none
             )
+    in
+    case Loading.updateWithCompletedTask (updateCtx identity model) model.scripts task loading of
+        Ok ( updatedLoadingTreasury, { updatedLocalState, runTasks } ) ->
+            case Loading.upgradeIfTreasuryLoadingFinished updatedLocalState updatedLoadingTreasury of
+                Just ( loadedTreasury, loadedLocalState ) ->
+                    case Loading.doubleCheckTreasuryScriptsHashes loadedTreasury of
+                        Ok _ ->
+                            { model
+                                | page = TreasuryPage <| Treasury.init model.scripts loadedTreasury
+                                , localStateUtxos = loadedLocalState
+                            }
+                                |> withTasks (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
+
+                        Err error ->
+                            encounteredLoadingError error
+
+                Nothing ->
+                    { model
+                        | page = LoadingPage updatedLoadingTreasury
+                        , localStateUtxos = updatedLocalState
+                    }
+                        |> withTasks (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
+
+        Err error ->
+            encounteredLoadingError error
+
+
+withTasks : List (ConcurrentTask String TaskCompleted) -> Model -> ( Model, Cmd Msg )
+withTasks tasks model =
+    let
+        ( updatedTaskPool, tasksCmds ) =
+            ConcurrentTask.Extra.attemptEach
+                { pool = model.taskPool
+                , send = sendTask
+                , onComplete = OnTaskComplete
+                }
+                tasks
+    in
+    ( { model | taskPool = updatedTaskPool }
+    , Cmd.batch tasksCmds
+    )
 
 
 
@@ -620,11 +706,23 @@ handleCompletedTask model taskCompleted =
 
 view : Model -> Html Msg
 view model =
+    let
+        ctx pageMsg =
+            { toMsg = pageMsg
+            , refreshUtxos = RefreshUtxos
+            , routeConfig =
+                { ignoreMsg = \_ -> NoMsg
+                , urlChangedMsg = UrlChanged
+                }
+            , networkId = model.networkId
+            , connectedWallet = model.connectedWallet
+            }
+    in
     div []
         [ Header.view { connect = ConnectButtonClicked, disconnect = DisconnectWallet } model.discoveredWallets model.connectedWallet
         , viewLocalStateUtxosSection model.localStateUtxos
         , case model.page of
-            Home ->
+            HomePage ->
                 Page.Home.view
                     { startTreasurySetup = StartTreasurySetup
                     , startTreasuryLoading = StartTreasuryLoading
@@ -632,8 +730,17 @@ view model =
                     }
                     model.treasuryLoadingParamsForm
 
+            SetupPage pageModel ->
+                Setup.view (ctx SetupMsg) pageModel
+
+            LoadingPage loading ->
+                Loading.view loading
+
+            TreasuryPage pageModel ->
+                Treasury.view (ctx TreasuryMsg) pageModel
+
             -- TODO: split treasury management pages
-            SignTxPage pageModel ->
+            SignTxPage previousPage pageModel ->
                 let
                     viewContext =
                         { wrapMsg = SignTxMsg

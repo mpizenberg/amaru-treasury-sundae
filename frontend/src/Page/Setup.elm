@@ -1,4 +1,4 @@
-module Treasury.Setup exposing (Form, LastStepParams, Msg(..), SetupTxs, Validation, ViewContext, amaruTreasury, initForm, updateForm, viewForm)
+module Page.Setup exposing (Model, Msg, init, update, updateWithTx, view)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Bytes.Map exposing (BytesMap)
@@ -8,6 +8,7 @@ import Cardano.CoinSelection as CoinSelection
 import Cardano.Data as Data
 import Cardano.Script as Script exposing (PlutusScript)
 import Cardano.Transaction as Transaction exposing (Transaction)
+import Cardano.TxExamples exposing (prettyTx)
 import Cardano.TxIntent as TxIntent exposing (TxFinalizationError, TxFinalized)
 import Cardano.Uplc as Uplc
 import Cardano.Utxo as Utxo exposing (Output, OutputReference, TransactionId)
@@ -20,15 +21,30 @@ import Html.Events as HE exposing (onClick)
 import Integer as I
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
+import Page.Loading as Loading exposing (Loaded)
 import Page.SignTx as SignTx
+import Route
 import Time exposing (Posix)
-import Treasury.Loading exposing (Loaded)
 import Treasury.LoadingParams exposing (LoadingParams)
 import Treasury.Scope as Scope exposing (Scope, Scripts)
 import Treasury.Scopes as Scopes exposing (Scopes)
 import Treasury.Sundae
 import Treasury.SundaeTypes as SundaeTypes
 import Utils exposing (displayPosixDate, viewError)
+
+
+type Model
+    = SetupForm Form
+    | SetupExec TxsState
+
+
+init : Posix -> Model
+init currentTime =
+    SetupForm <| initForm currentTime
+
+
+
+-- Form
 
 
 type alias Form =
@@ -57,10 +73,114 @@ initForm currentTime =
 
 
 
--- Update
+-- Exec
+
+
+type alias TxsState =
+    { txsPrep : TxsPrep
+    , treasury : Loaded
+    , tracking :
+        { scopes : TxState
+        , permissions : TxState
+        , registries : TxState
+        }
+    }
+
+
+type alias TxsPrep =
+    { scopes : SignTx.Prep
+    , permissions : SignTx.Prep
+    , registries : SignTx.Prep
+    }
+
+
+type TxState
+    = TxNotSubmittedYet
+    | TxSubmitted
+
+
+initTxsState : TxsPrep -> Loaded -> TxsState
+initTxsState txs treasury =
+    { txsPrep = txs
+    , treasury = treasury
+    , tracking =
+        { scopes = TxNotSubmittedYet
+        , permissions = TxNotSubmittedYet
+        , registries = TxNotSubmittedYet
+        }
+    }
+
+
+isDone : TxsState -> Maybe Loaded
+isDone ({ tracking } as state) =
+    case ( tracking.scopes, tracking.permissions, tracking.registries ) of
+        ( TxSubmitted, TxSubmitted, TxSubmitted ) ->
+            Just state.treasury
+
+        _ ->
+            Nothing
+
+
+
+-- UPDATE ############################################################
+
+
+type alias Context a =
+    { a
+        | connectedWallet : Maybe Cip30.Wallet
+        , localStateUtxos : Utxo.RefDict Output
+        , networkId : NetworkId
+    }
 
 
 type Msg
+    = FormMsg FormMsg
+    | TryBuildSetupTxs
+
+
+update : Context a -> Scripts -> Msg -> Model -> Model
+update ctx scripts msg model =
+    case ( msg, model ) of
+        ( FormMsg formMsg, SetupForm form ) ->
+            SetupForm <| updateForm formMsg form
+
+        ( TryBuildSetupTxs, SetupForm form ) ->
+            case form.validation of
+                Just (Ok scopeOwners) ->
+                    case ctx.connectedWallet of
+                        Nothing ->
+                            SetupForm { form | validation = Just <| Err "Please connect wallet first" }
+
+                        Just wallet ->
+                            case amaruTreasury ctx.localStateUtxos scripts ctx.networkId wallet scopeOwners of
+                                Err error ->
+                                    SetupForm { form | validation = Just <| Err error }
+
+                                Ok ( txs, treasury ) ->
+                                    SetupExec <| initTxsState txs treasury
+
+                _ ->
+                    SetupForm { form | validation = Just <| Err "Validate the form first" }
+
+        _ ->
+            model
+
+
+updateWithTx : Bytes TransactionId -> Model -> Model
+updateWithTx txId model =
+    case model of
+        SetupExec state ->
+            SetupExec <| markTxAsSubmitted txId state
+
+        SetupForm _ ->
+            model
+
+
+
+-- Update Form
+
+
+type FormMsg
     = LedgerOwnerField String
     | ConsensusOwnerField String
     | MercenariesOwnerField String
@@ -69,7 +189,7 @@ type Msg
     | ValidateSetupForm
 
 
-updateForm : Msg -> Form -> Form
+updateForm : FormMsg -> Form -> Form
 updateForm msg form =
     case msg of
         LedgerOwnerField value ->
@@ -115,6 +235,25 @@ validateKeyHash hex =
 
 
 
+-- Update Setup Txs
+
+
+markTxAsSubmitted : Bytes TransactionId -> TxsState -> TxsState
+markTxAsSubmitted txId ({ tracking } as state) =
+    if txId == state.txsPrep.scopes.txId then
+        { state | tracking = { tracking | scopes = TxSubmitted } }
+
+    else if txId == state.txsPrep.permissions.txId then
+        { state | tracking = { tracking | permissions = TxSubmitted } }
+
+    else if txId == state.txsPrep.registries.txId then
+        { state | tracking = { tracking | registries = TxSubmitted } }
+
+    else
+        state
+
+
+
 -- Setup
 
 
@@ -133,14 +272,7 @@ type alias LastStepParams =
     }
 
 
-type alias SetupTxs =
-    { scopes : SignTx.Prep
-    , permissions : SignTx.Prep
-    , registries : SignTx.Prep
-    }
-
-
-amaruTreasury : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> { expiration : Int, scopeOwners : Scopes MultisigScript } -> Result String ( SetupTxs, Loaded )
+amaruTreasury : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> { expiration : Int, scopeOwners : Scopes MultisigScript } -> Result String ( TxsPrep, Loaded )
 amaruTreasury localStateUtxos scripts networkId connectedWallet { expiration, scopeOwners } =
     setupAmaruScopes localStateUtxos scripts.scopesTrap networkId connectedWallet scopeOwners
         |> Result.andThen
@@ -190,7 +322,7 @@ amaruTreasury localStateUtxos scripts networkId connectedWallet { expiration, sc
             )
 
 
-setupLastStep : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> LastStepParams -> Result String ( SetupTxs, Loaded )
+setupLastStep : Utxo.RefDict Output -> Scripts -> NetworkId -> Cip30.Wallet -> LastStepParams -> Result String ( TxsPrep, Loaded )
 setupLastStep localStateUtxos scripts networkId connectedWallet { txs, rootUtxo, scopeOwners, scopesPermissions, scopesRegistries, contingencyPermissions, contingencyRegistry, loadingParams } =
     let
         scopesTreasuryScriptsResult : Result String (Scopes PlutusScript)
@@ -554,13 +686,24 @@ pickSeedUtxo localStateUtxos address amount =
 -- View ##############################################################
 
 
-type alias ViewContext msg =
-    { toMsg : Msg -> msg
-    , tryBuildSetupTxs : msg
+type alias ViewContext a msg =
+    { a
+        | toMsg : Msg -> msg
+        , routeConfig : Route.Config msg
     }
 
 
-viewForm : ViewContext msg -> Form -> Html msg
+view : ViewContext a msg -> Model -> Html msg
+view ctx model =
+    case model of
+        SetupForm form ->
+            viewForm ctx form
+
+        SetupExec state ->
+            viewExec ctx.routeConfig state
+
+
+viewForm : ViewContext a msg -> Form -> Html msg
 viewForm ctx form =
     case form.validation of
         Nothing ->
@@ -573,7 +716,7 @@ viewForm ctx form =
             viewScopeOwnersSetup ctx expiration scopeOwners
 
 
-viewTreasurySetupFormHelper : ViewContext msg -> Form -> Maybe String -> Html msg
+viewTreasurySetupFormHelper : ViewContext a msg -> Form -> Maybe String -> Html msg
 viewTreasurySetupFormHelper ctx form errors =
     div []
         [ Html.h2 [] [ text "Setup New Treasury" ]
@@ -582,7 +725,7 @@ viewTreasurySetupFormHelper ctx form errors =
             , Html.input
                 [ HA.type_ "number"
                 , HA.value <| String.fromInt form.expiration
-                , HE.onInput (ctx.toMsg << ExpirationField)
+                , HE.onInput (ctx.toMsg << FormMsg << ExpirationField)
                 ]
                 []
             , text <| " (" ++ displayPosixDate (Time.millisToPosix form.expiration) ++ ")"
@@ -591,7 +734,7 @@ viewTreasurySetupFormHelper ctx form errors =
             [ Html.h3 [] [ text "Scope Owners" ]
             , Html.p [] [ text "Enter the aicone multisigs for each scope owner (for now just enter a public key hash):" ]
             ]
-        , Html.map ctx.toMsg <|
+        , Html.map (ctx.toMsg << FormMsg) <|
             div []
                 [ viewFormField "Ledger" form.ledgerOwner LedgerOwnerField
                 , viewFormField "Consensus" form.consensusOwner ConsensusOwnerField
@@ -599,14 +742,14 @@ viewTreasurySetupFormHelper ctx form errors =
                 , viewFormField "Marketing" form.marketingOwner MarketingOwnerField
                 ]
         , Html.p []
-            [ Html.button [ onClick (ctx.toMsg ValidateSetupForm) ]
+            [ Html.button [ onClick (ctx.toMsg <| FormMsg ValidateSetupForm) ]
                 [ text "Validate scope owners & prepare Txs" ]
             ]
         , viewError errors
         ]
 
 
-viewFormField : String -> String -> (String -> Msg) -> Html Msg
+viewFormField : String -> String -> (String -> FormMsg) -> Html FormMsg
 viewFormField label value fieldMsg =
     div []
         [ Html.label [] [ text <| label ++ ": " ]
@@ -620,7 +763,7 @@ viewFormField label value fieldMsg =
         ]
 
 
-viewScopeOwnersSetup : ViewContext msg -> Int -> Scopes MultisigScript -> Html msg
+viewScopeOwnersSetup : ViewContext a msg -> Int -> Scopes MultisigScript -> Html msg
 viewScopeOwnersSetup ctx expiration scopeOwners =
     div []
         [ Html.h2 [] [ text "Setup New Treasury" ]
@@ -633,7 +776,64 @@ viewScopeOwnersSetup ctx expiration scopeOwners =
             , Html.li [] [ text <| "marketing: " ++ Debug.toString scopeOwners.marketing ]
             ]
         , Html.p []
-            [ Html.button [ onClick ctx.tryBuildSetupTxs ]
+            [ Html.button [ onClick <| ctx.toMsg TryBuildSetupTxs ]
                 [ text "Build the Txs" ]
             ]
+        ]
+
+
+
+-- View Setup Transactions
+
+
+viewExec : Route.Config msg -> TxsState -> Html msg
+viewExec routingConfig { txsPrep, treasury, tracking } =
+    div []
+        [ Html.h2 [] [ text "Treasury State after Initialization" ]
+        , Loading.viewRootUtxo treasury.rootUtxo
+        , Scope.viewSetup "ledger" treasury.scopes.ledger
+        , Scope.viewSetup "consensus" treasury.scopes.consensus
+        , Scope.viewSetup "mercenaries" treasury.scopes.mercenaries
+        , Scope.viewSetup "marketing" treasury.scopes.marketing
+        , Scope.viewSetup "contingency" treasury.contingency
+        , Html.h2 [] [ text "Txs to submit for Treasury Initialization" ]
+        , Html.h3 [] [ text "Scope Owners Definition" ]
+        , viewTxStatus routingConfig tracking.scopes txsPrep.scopes
+        , Html.h3 [] [ text "Permissions Stake Registration" ]
+        , viewTxStatus routingConfig tracking.permissions txsPrep.permissions
+        , Html.h3 [] [ text "Registries Initializations" ]
+        , viewTxStatus routingConfig tracking.registries txsPrep.registries
+        ]
+
+
+viewTxStatus : Route.Config msg -> TxState -> SignTx.Prep -> Html msg
+viewTxStatus routingConfig txState ({ txId, tx, expectedSignatures, signerDescriptions } as prep) =
+    let
+        displaySigner signer =
+            case Bytes.Map.get signer signerDescriptions of
+                Nothing ->
+                    Html.li [] [ text <| "Signer: " ++ Bytes.toHex signer ]
+
+                Just description ->
+                    Html.li [] [ text <| description ++ ": " ++ Bytes.toHex signer ]
+
+        actions =
+            case txState of
+                TxNotSubmittedYet ->
+                    Html.button []
+                        [ SignTx.signingLink routingConfig prep [] [ text "Sign on signing page" ] ]
+
+                TxSubmitted ->
+                    text "Tx has been submitted!"
+    in
+    div []
+        [ Html.p [] [ text <| "Tx state: " ++ Debug.toString txState ]
+        , Html.p []
+            [ text <| "Expected signers:"
+            , Html.ul [] <| List.map displaySigner expectedSignatures
+            ]
+        , Html.p [] [ actions ]
+        , Html.p [] [ text <| "Tx details:" ]
+        , Html.p [] [ text <| "Tx ID: " ++ Bytes.toHex txId ]
+        , Html.pre [] [ text <| prettyTx tx ]
         ]

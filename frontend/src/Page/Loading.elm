@@ -1,4 +1,4 @@
-module Treasury.Loading exposing (Context, Loaded, Loading, LoadingScope, OutMsg, TaskCompleted(..), doubleCheckTreasuryScriptsHashes, refreshUtxos, startLoading, updateWithCompletedTask, upgradeIfTreasuryLoadingFinished, view, viewRootUtxo)
+module Page.Loading exposing (Context, Loaded, Loading, LoadingScope, OutMsg, TaskCompleted(..), doubleCheckTreasuryScriptsHashes, refreshUtxos, startLoading, updateWithCompletedTask, upgradeIfTreasuryLoadingFinished, view, viewRootUtxo)
 
 import Api
 import Bytes.Comparable as Bytes exposing (Bytes)
