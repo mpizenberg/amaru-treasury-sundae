@@ -11,6 +11,7 @@ import Cardano.Script as Script exposing (PlutusVersion(..), ScriptCbor)
 import Cardano.Transaction as Transaction exposing (Transaction)
 import Cardano.TxIntent as TxIntent
 import Cardano.Utxo as Utxo exposing (Output, TransactionId)
+import Cmd.Extra
 import ConcurrentTask exposing (ConcurrentTask)
 import ConcurrentTask.Extra
 import Dict
@@ -33,6 +34,7 @@ import Task
 import Time exposing (Posix)
 import Treasury.LoadingParams as LoadingParams
 import Treasury.Scope exposing (Scripts)
+import Update
 
 
 type alias Flags =
@@ -138,7 +140,7 @@ initialModel db scripts posixTimeMs =
         treasuryLoadingParamsForm =
             { pragmaScriptHash = ""
             , registriesSeedUtxo = { transactionId = "", outputIndex = 0 }
-            , treasuryConfigExpiration = posixTimeMs
+            , expiration = posixTimeMs
             , error = Nothing
             }
     in
@@ -159,6 +161,8 @@ initialModel db scripts posixTimeMs =
 
 type Page
     = HomePage
+      -- TODO: Actually make urls for SetupPage, LoadingPage and TreasuryPage
+      -- With TreasuryPage loading actually redirecting to the LoadingPage for now.
     | SetupPage Setup.Model
     | LoadingPage Loading
     | TreasuryPage Treasury.Model
@@ -360,21 +364,21 @@ update msg ({ loadingForm } as model) =
                     ( model, Cmd.none )
 
         StartTreasuryLoading ->
-            case Loading.startLoading (updateCtx identity model) model.scripts model.loadingForm of
+            case Loading.startLoading (updateCtx identity model) model.scripts loadingForm of
                 Ok ( loading, { updatedLocalState, runTasks } ) ->
                     { model
                         | localStateUtxos = updatedLocalState
                         , page = LoadingPage loading
                     }
                         |> withTasks (List.map (ConcurrentTask.map TreasuryLoadingTask) runTasks)
+                        |> Update.andThen (handleUrlChange (Route.Treasury loading.loadingParams))
 
                 Err error ->
-                    ( { model
+                    { model
                         | page = HomePage
                         , loadingForm = { loadingForm | error = Just error }
-                      }
-                    , Cmd.none
-                    )
+                    }
+                        |> handleUrlChange Route.Home
 
         LoadingParamsMsg paramsMsg ->
             ( { model | loadingForm = LoadingParams.updateForm paramsMsg loadingForm }, Cmd.none )
@@ -441,6 +445,51 @@ handleUrlChange route model =
               }
             , pushUrlCmd
             )
+
+        Route.Setup ->
+            ( { model
+                | error = Nothing
+
+                -- We go to the setup page with currentTime = 0,
+                -- but also ask current time in a task to re-init the page
+                , page = SetupPage <| Setup.init (Time.millisToPosix 0)
+                , appUrl = appUrl
+              }
+            , Cmd.batch
+                [ pushUrlCmd
+                , Task.perform StartTreasurySetupWithCurrentTime Time.now
+                ]
+            )
+
+        Route.Treasury params ->
+            -- If the treasury is already loaded, with the same params,
+            -- we don’t do anything, otherwise we redirect to the loading page.
+            let
+                doNothing =
+                    ( { model | appUrl = appUrl }, pushUrlCmd )
+
+                reload =
+                    ( { model | loadingForm = LoadingParams.formFromParams params }
+                    , Cmd.Extra.perform StartTreasuryLoading
+                    )
+            in
+            case model.page of
+                LoadingPage { loadingParams } ->
+                    if loadingParams == params then
+                        doNothing
+
+                    else
+                        reload
+
+                TreasuryPage { loaded } ->
+                    if loaded.loadingParams == params then
+                        doNothing
+
+                    else
+                        reload
+
+                _ ->
+                    reload
 
         Route.Signing args ->
             let
@@ -658,12 +707,11 @@ handleCompletedLoadingTask : Loading.TaskCompleted -> Loading -> Model -> ( Mode
 handleCompletedLoadingTask task loading ({ loadingForm } as model) =
     let
         encounteredLoadingError error =
-            ( { model
+            { model
                 | page = HomePage
                 , loadingForm = { loadingForm | error = Just error }
-              }
-            , Cmd.none
-            )
+            }
+                |> handleUrlChange Route.Home
     in
     case Loading.updateWithCompletedTask (updateCtx identity model) model.scripts task loading of
         Ok ( updatedLoadingTreasury, { updatedLocalState, runTasks } ) ->

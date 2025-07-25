@@ -1,4 +1,4 @@
-module Treasury.LoadingParams exposing (Form, LoadingParams, Msg(..), encode, formDecoder, updateForm, validate, view, viewForm, viewReload)
+module Treasury.LoadingParams exposing (Form, LoadingParams, Msg(..), encode, formDecoder, formFromParams, updateForm, validate, view, viewForm, viewReload)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (CredentialHash)
@@ -15,7 +15,7 @@ import Utils exposing (displayPosixDate, viewExpirationDate)
 type alias Form =
     { pragmaScriptHash : String
     , registriesSeedUtxo : { transactionId : String, outputIndex : Int }
-    , treasuryConfigExpiration : Int
+    , expiration : Int
     , error : Maybe String
     }
 
@@ -55,6 +55,18 @@ encode { pragmaScriptHash, registriesSeedUtxo, expiration } =
         ]
 
 
+formFromParams : LoadingParams -> Form
+formFromParams { pragmaScriptHash, registriesSeedUtxo, expiration } =
+    { pragmaScriptHash = Bytes.toHex pragmaScriptHash
+    , registriesSeedUtxo =
+        { transactionId = Bytes.toHex registriesSeedUtxo.transactionId
+        , outputIndex = registriesSeedUtxo.outputIndex
+        }
+    , expiration = Time.posixToMillis expiration
+    , error = Nothing
+    }
+
+
 
 -- UPDATE ############################################################
 
@@ -90,7 +102,7 @@ updateForm msg form =
         UpdateExpiration value ->
             case String.toInt value of
                 Just expiration ->
-                    { form | treasuryConfigExpiration = expiration }
+                    { form | expiration = expiration }
 
                 Nothing ->
                     form
@@ -116,7 +128,7 @@ validate formParams =
                 Ok
                     { pragmaScriptHash = scriptHash
                     , registriesSeedUtxo = OutputReference transactionId formParams.registriesSeedUtxo.outputIndex
-                    , expiration = Time.millisToPosix formParams.treasuryConfigExpiration
+                    , expiration = Time.millisToPosix formParams.expiration
                     }
 
 
@@ -160,11 +172,11 @@ viewForm form =
             [ Html.label [] [ text "Expiration date (Posix): " ]
             , Html.input
                 [ HA.type_ "number"
-                , HA.value <| String.fromInt form.treasuryConfigExpiration
+                , HA.value <| String.fromInt form.expiration
                 , HE.onInput UpdateExpiration
                 ]
                 []
-            , text <| " (" ++ displayPosixDate (Time.millisToPosix form.treasuryConfigExpiration) ++ ")"
+            , text <| " (" ++ displayPosixDate (Time.millisToPosix form.expiration) ++ ")"
             ]
         ]
 

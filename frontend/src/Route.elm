@@ -4,16 +4,23 @@ import AppUrl exposing (AppUrl)
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address exposing (CredentialHash)
 import Cardano.Transaction as Transaction exposing (Transaction)
+import Cardano.Utxo as Utxo exposing (OutputReference)
+import Cbor.Decode
+import Cbor.Encode
 import Dict
 import Html exposing (Html)
 import Html.Attributes as HA
 import Html.Events as HE
 import Json.Decode as JD exposing (Decoder)
+import Time
+import Treasury.LoadingParams exposing (LoadingParams)
 import Url
 
 
 type Route
     = Home
+    | Setup
+    | Treasury LoadingParams
     | Signing
         { tx : Maybe Transaction
         , expectedSigners : List { keyHash : Bytes CredentialHash, keyName : String }
@@ -59,10 +66,24 @@ toAppUrl : Route -> AppUrl
 toAppUrl route =
     case route of
         NotFound ->
-            AppUrl.fromPath [ "404" ]
+            AppUrl.fromPath [ "page", "404" ]
 
         Home ->
             AppUrl.fromPath []
+
+        Setup ->
+            AppUrl.fromPath [ "page", "setup" ]
+
+        Treasury { pragmaScriptHash, registriesSeedUtxo, expiration } ->
+            { path = [ "page", "treasury" ]
+            , queryParameters =
+                Dict.fromList
+                    [ ( "pragmaScriptHash", [ Bytes.toHex pragmaScriptHash ] )
+                    , ( "registriesSeedUtxo", [ utxoRefToHex registriesSeedUtxo ] )
+                    , ( "expiration", [ String.fromInt <| Time.posixToMillis expiration ] )
+                    ]
+            , fragment = Nothing
+            }
 
         Signing { tx, expectedSigners } ->
             { path = [ "page", "signing" ]
@@ -76,6 +97,20 @@ toAppUrl route =
             }
 
 
+utxoRefToHex : OutputReference -> String
+utxoRefToHex ref =
+    Utxo.encodeOutputReference ref
+        |> Cbor.Encode.encode
+        |> Bytes.fromBytes
+        |> Bytes.toHex
+
+
+utxoRefFromHex : String -> Maybe OutputReference
+utxoRefFromHex hex =
+    Bytes.fromHex hex
+        |> Maybe.andThen (\b -> Bytes.toBytes b |> Cbor.Decode.decode Utxo.decodeOutputReference)
+
+
 fromLocationHref : String -> Route
 fromLocationHref locationHref =
     case Url.fromString locationHref |> Maybe.map AppUrl.fromUrl of
@@ -86,6 +121,39 @@ fromLocationHref locationHref =
             case path of
                 [] ->
                     Home
+
+                [ "page", "setup" ] ->
+                    Setup
+
+                [ "page", "treasury" ] ->
+                    let
+                        qParam name =
+                            Dict.get name queryParameters
+                                |> Maybe.andThen List.head
+
+                        maybePragmaScriptHash =
+                            qParam "pragmaScriptHash"
+                                |> Maybe.andThen Bytes.fromHex
+
+                        maybeRegistriesSeedUtxo =
+                            qParam "registriesSeedUtxo"
+                                |> Maybe.andThen utxoRefFromHex
+
+                        maybeExpiration =
+                            qParam "expiration"
+                                |> Maybe.andThen String.toInt
+                                |> Maybe.map Time.millisToPosix
+                    in
+                    case ( maybePragmaScriptHash, maybeRegistriesSeedUtxo, maybeExpiration ) of
+                        ( Just pragmaScriptHash, Just registriesSeedUtxo, Just expiration ) ->
+                            Treasury
+                                { pragmaScriptHash = pragmaScriptHash
+                                , registriesSeedUtxo = registriesSeedUtxo
+                                , expiration = expiration
+                                }
+
+                        _ ->
+                            Home
 
                 [ "page", "signing" ] ->
                     Signing
