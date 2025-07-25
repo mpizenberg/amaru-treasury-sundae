@@ -97,7 +97,6 @@ type Msg
       -- Signature page
     | SignTxMsg SignTx.Msg
       -- Treasury management
-    | StartTreasurySetup
     | StartTreasurySetupWithCurrentTime Posix
     | SetupMsg Setup.Msg
     | StartTreasuryLoading
@@ -339,11 +338,6 @@ update msg ({ loadingForm } as model) =
                     ( model, Cmd.none )
 
         -- Treasury management
-        StartTreasurySetup ->
-            ( model
-            , Task.perform StartTreasurySetupWithCurrentTime Time.now
-            )
-
         StartTreasurySetupWithCurrentTime currentTime ->
             ( { model | page = SetupPage <| Setup.init currentTime }, Cmd.none )
 
@@ -762,13 +756,15 @@ withTasks tasks model =
 view : Model -> Html Msg
 view model =
     let
+        routeConfig =
+            { ignoreMsg = \_ -> NoMsg
+            , urlChangedMsg = UrlChanged
+            }
+
         ctx pageMsg =
             { toMsg = pageMsg
             , refreshUtxos = RefreshUtxos
-            , routeConfig =
-                { ignoreMsg = \_ -> NoMsg
-                , urlChangedMsg = UrlChanged
-                }
+            , routeConfig = routeConfig
             , networkId = model.networkId
             , connectedWallet = model.connectedWallet
             }
@@ -779,7 +775,7 @@ view model =
         , case model.page of
             HomePage ->
                 Page.Home.view
-                    { startTreasurySetup = StartTreasurySetup
+                    { routeConfig = routeConfig
                     , startTreasuryLoading = StartTreasuryLoading
                     , loadingParamsMsg = LoadingParamsMsg
                     }
