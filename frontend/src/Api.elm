@@ -94,6 +94,8 @@ protocolParamsDecoder =
 
 retrieveScriptRefUtxos : { db : JD.Value } -> NetworkId -> Bytes CredentialHash -> ConcurrentTask String (Utxo.RefDict Output)
 retrieveScriptRefUtxos db networkId scriptHash =
+    -- TODO: WARNING, this Koios endpoint seems to not work as expected!
+    -- Waiting for answers from the Koios team.
     let
         url =
             koiosUrl networkId ++ "/script_utxos?_script_hash=" ++ Bytes.toHex scriptHash

@@ -169,6 +169,9 @@ buildTx { localStateUtxos, networkId, wallet } rootUtxo currentTime scope form =
 
         -- ( disburseTxIntents, disburseOtherInfo )
         disburseIntentsResult =
+            -- TODO: I’m getting the following building error, which makes no sense:
+            -- Missing reference script for output reference (ref of output #0 of the 2nd setup Tx, doing stake registrations of each permissions script)
+            -- It makes no sense because that output is just the change back to my wallet ...
             disburse networkId rootUtxo scope requiredSigners validityRange spentUtxo (\_ -> recipients) totalValueSpent
 
         feeSource =
@@ -202,8 +205,10 @@ disburse networkId rootUtxoRef scope requiredSigners validityRange ( spentUtxoRe
                 Nothing ->
                     Witness.ByValue <| Script.cborWrappedBytes treasuryScript
 
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
+                Just _ ->
+                    -- Witness.ByReference ref
+                    -- TODO: figure out why Koios is misbehaving and giving incorrect utxos
+                    Witness.ByValue <| Script.cborWrappedBytes treasuryScript
 
         spendConfig : SpendConfig
         spendConfig =
@@ -244,8 +249,10 @@ disburse networkId rootUtxoRef scope requiredSigners validityRange ( spentUtxoRe
                 Nothing ->
                     Witness.ByValue <| Script.cborWrappedBytes permissionsScript
 
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
+                Just _ ->
+                    -- Witness.ByReference ref
+                    -- TODO: figure out why Koios is misbehaving and giving incorrect utxos
+                    Witness.ByValue <| Script.cborWrappedBytes permissionsScript
 
         overflowValue =
             Value.subtract value spentOutput.amount
