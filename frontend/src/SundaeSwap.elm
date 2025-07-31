@@ -4,7 +4,7 @@ import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Address, CredentialHash)
 import Cardano.Data as Data exposing (Data)
 import Cardano.MultiAsset exposing (AssetName)
-import Cardano.Utxo exposing (DatumOption)
+import Cardano.Utxo as Utxo exposing (DatumOption)
 import Integer as I
 import MultisigScript exposing (MultisigScript)
 import Natural as N exposing (Natural)
@@ -42,7 +42,10 @@ orderDatumToData datum =
         , Data.Int <| I.fromNatural datum.scooperFee
 
         -- Todo: actually do the Datum conversion
-        , Data.Constr N.zero [ Address.toData datum.destination.address, Data.maybe Nothing ]
+        , Data.Constr N.zero
+            [ Address.toData datum.destination.address
+            , Utxo.datumOptionToData datum.destination.datum
+            ]
         , orderToData datum.limitOrder
         , datum.extensions
         ]
