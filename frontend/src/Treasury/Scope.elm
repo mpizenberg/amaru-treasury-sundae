@@ -84,6 +84,7 @@ type alias ViewContext a msg =
         -- TreasuryMergingMsg <| StartMergeUtxos
         , startMergingUtxos : String -> Scope -> OutputReference -> msg
         , startDisburse : StartDisburseInfo -> msg
+        , startSwap : StartDisburseInfo -> msg
     }
 
 
@@ -194,9 +195,12 @@ viewTreasuryUtxos ctx scopeName scope utxos =
         disburseButton utxo =
             Html.button [ onClick (ctx.startDisburse <| startDisburseInfo utxo) ] [ text "Disburse" ]
 
+        swapButton utxo =
+            Html.button [ onClick (ctx.startSwap <| startDisburseInfo utxo) ] [ text "Swap" ]
+
         viewDetailedUtxoItem utxo =
             Html.li []
-                (viewDetailedUtxo utxo ++ [ disburseButton utxo ])
+                (viewDetailedUtxo utxo ++ [ disburseButton utxo, swapButton utxo ])
     in
     div []
         [ Html.p [] [ text <| "Treasury UTxOs count: " ++ String.fromInt (Dict.Any.size utxos) ]

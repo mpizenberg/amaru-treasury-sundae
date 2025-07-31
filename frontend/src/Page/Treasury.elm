@@ -28,6 +28,7 @@ import Treasury.LoadingParams as LoadingParams
 import Treasury.Merge as Merge
 import Treasury.Scope as Scope exposing (Scope, Scripts, StartDisburseInfo, viewDetailedUtxo)
 import Treasury.Scopes as Scopes
+import Treasury.Swap as Swap
 
 
 type alias Model =
@@ -51,6 +52,7 @@ type Action
     = Idle
     | MergeTreasuryUtxos ScopeCtx ActionStatus
     | Disburse ScopeCtx ActionStatus Disburse.Form
+    | Swap ScopeCtx ActionStatus Swap.Form
 
 
 type alias ScopeCtx =
@@ -74,6 +76,7 @@ type Msg
     = PublishScript (Bytes CredentialHash) PlutusScript
     | TreasuryMergingMsg TreasuryMergingMsg
     | TreasuryDisburseMsg TreasuryDisburseMsg
+    | TreasurySwapMsg TreasurySwapMsg
 
 
 type TreasuryMergingMsg
@@ -89,6 +92,14 @@ type TreasuryDisburseMsg
     | BuildDisburseTransaction
     | BuildDisburseTransactionWithTime Posix
     | CancelDisburseAction
+
+
+type TreasurySwapMsg
+    = StartSwap StartDisburseInfo
+    | SwapFormMsg Swap.Msg
+    | BuildSwapTransaction
+    | BuildSwapTransactionWithTime Posix
+    | CancelSwapAction
 
 
 type alias UpdateContext a msg =
@@ -110,6 +121,9 @@ update ctx msg model =
 
         TreasuryDisburseMsg submsg ->
             handleTreasuryDisburseMsg ctx submsg model
+
+        TreasurySwapMsg submsg ->
+            handleTreasurySwapMsg ctx submsg model
 
         PublishScript hash script ->
             createPublishScriptTx ctx hash script model
@@ -264,6 +278,91 @@ handleDisburseUpdate model disburseUpdate =
 
 
 
+-- Swap
+
+
+handleTreasurySwapMsg : UpdateContext a msg -> TreasurySwapMsg -> Model -> ( Model, Cmd msg )
+handleTreasurySwapMsg ctx msg model =
+    case msg of
+        StartSwap startSwapInfo ->
+            ( handleStartSwap startSwapInfo model, Cmd.none )
+
+        SwapFormMsg subMsg ->
+            ( handleSwapFormUpdate (Swap.update subMsg) model, Cmd.none )
+
+        BuildSwapTransaction ->
+            ( model
+            , Task.perform (ctx.toMsg << TreasurySwapMsg << BuildSwapTransactionWithTime) Time.now
+            )
+
+        BuildSwapTransactionWithTime currentTime ->
+            case ctx.connectedWallet of
+                Nothing ->
+                    ( { model | error = Just "Please connect your wallet" }, Cmd.none )
+
+                Just wallet ->
+                    let
+                        buildCtx =
+                            { localStateUtxos = ctx.localStateUtxos
+                            , networkId = ctx.networkId
+                            , wallet = wallet
+                            }
+                    in
+                    ( handleSwapUpdate model <|
+                        \({ rootUtxo, scope } as scopeCtx) _ form ->
+                            case Swap.validateForm ctx.networkId form of
+                                Ok swapConfig ->
+                                    case Swap.buildTx buildCtx rootUtxo currentTime scope swapConfig of
+                                        Ok ({ tx } as txFinalized) ->
+                                            Swap scopeCtx (ReadyForSignature (Transaction.computeTxId tx) txFinalized) form
+
+                                        Err err ->
+                                            Swap scopeCtx (BuildingFailure err) form
+
+                                Err err ->
+                                    Swap scopeCtx PreparingTx { form | error = Just err }
+                    , Cmd.none
+                    )
+
+        CancelSwapAction ->
+            ( { model | action = Idle }, Cmd.none )
+
+
+handleStartSwap : StartDisburseInfo -> Model -> Model
+handleStartSwap { scopeName, scope, allOwners, rootUtxo, spendingUtxo } model =
+    if not (Dict.Any.isEmpty scope.treasuryUtxos) then
+        let
+            scopeCtx =
+                { scopeName = scopeName
+                , scope = scope
+                , rootUtxo = rootUtxo
+                }
+
+            form =
+                Swap.initForm scopeName allOwners spendingUtxo
+        in
+        { model | action = Swap scopeCtx PreparingTx form, error = Nothing }
+
+    else
+        { model | error = Just <| scopeName ++ " treasury is empty. No disbursement possible." }
+
+
+handleSwapFormUpdate : (Swap.Form -> Swap.Form) -> Model -> Model
+handleSwapFormUpdate formUpdate model =
+    handleSwapUpdate model (\scopeCtx status form -> Swap scopeCtx status <| formUpdate form)
+
+
+handleSwapUpdate : Model -> (ScopeCtx -> ActionStatus -> Swap.Form -> Action) -> Model
+handleSwapUpdate model swapUpdate =
+    case model.action of
+        Swap scopeCtx status form ->
+            { model | action = swapUpdate scopeCtx status form, error = Nothing }
+
+        _ ->
+            model
+
+
+
 -- Publish
 
 
@@ -381,6 +480,9 @@ view ctx model =
         Disburse scopeCtx status form ->
             viewDisburseAction ctx scopeCtx status form
 
+        Swap scopeCtx status form ->
+            viewSwapAction ctx scopeCtx status form
+
 
 viewTreasurySection : ViewContext a msg -> Loaded -> Html msg
 viewTreasurySection ctx ({ rootUtxo, loadingParams, scopes, contingency } as loaded) =
@@ -398,6 +500,7 @@ viewTreasurySection ctx ({ rootUtxo, loadingParams, scopes, contingency } as loa
             , refreshTreasuryUtxos = ctx.refreshUtxos loaded
             , startMergingUtxos = \name scope ref -> ctx.toMsg <| TreasuryMergingMsg <| StartMergeUtxos name scope ref
             , startDisburse = ctx.toMsg << TreasuryDisburseMsg << StartDisburse
+            , startSwap = ctx.toMsg << TreasurySwapMsg << StartSwap
             }
     in
     div []
@@ -523,5 +626,59 @@ viewDisburseAction { toMsg, routeConfig, connectedWallet } { scopeName } status 
                     , Html.button []
                         [ SignTx.signingLink routeConfig signingPrep [] [ text "Sign on signing page" ] ]
                     , Html.button [ onClick <| toMsg <| TreasuryDisburseMsg CancelDisburseAction ] [ text "Cancel" ]
+                    ]
+        ]
+
+
+
+-- Swap
+
+
+viewSwapAction : ViewContext a msg -> ScopeCtx -> ActionStatus -> Swap.Form -> Html msg
+viewSwapAction { toMsg, routeConfig, connectedWallet, networkId } { scopeName } status form =
+    div []
+        [ Html.h3 [] [ text ("Swap - " ++ scopeName ++ " Scope") ]
+        , case status of
+            PreparingTx ->
+                let
+                    swapCtx =
+                        { connectedWallet = connectedWallet
+                        , networkId = networkId
+                        , routeConfig = routeConfig
+                        , msg =
+                            { from = SwapFormMsg
+                            , cancel = CancelSwapAction
+                            , buildTx = BuildSwapTransaction
+                            }
+                        }
+                in
+                Html.map (toMsg << TreasurySwapMsg) <|
+                    Swap.viewForm swapCtx scopeName form
+
+            BuildingFailure error ->
+                Html.map (toMsg << TreasurySwapMsg) <|
+                    div []
+                        [ Html.p [] [ text "Failed to build the Tx, with error:" ]
+                        , Html.pre [] [ text error ]
+                        , Html.button [ onClick CancelSwapAction ] [ text "Cancel" ]
+                        ]
+
+            ReadyForSignature txId { tx, expectedSignatures } ->
+                let
+                    signingPrep =
+                        { txId = txId
+                        , tx = tx
+                        , expectedSignatures = expectedSignatures
+
+                        -- signerDescriptions : BytesMap CredentialHash String
+                        , signerDescriptions = Bytes.Map.empty
+                        }
+                in
+                div []
+                    [ Html.p [] [ text "Transaction built successfully." ]
+                    , Html.pre [] [ text <| prettyTx tx ]
+                    , Html.button []
+                        [ SignTx.signingLink routeConfig signingPrep [] [ text "Sign on signing page" ] ]
+                    , Html.button [ onClick <| toMsg <| TreasurySwapMsg CancelSwapAction ] [ text "Cancel" ]
                     ]
         ]

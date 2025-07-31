@@ -1,4 +1,4 @@
-module Treasury.Disburse exposing (BuildContext, Form, Msg(..), ViewContext, buildTx, initForm, update, viewForm)
+module Treasury.Disburse exposing (BuildContext, Form, Msg(..), ViewContext, buildTx, disburse, initForm, update, viewForm)
 
 import Bytes.Comparable exposing (Bytes)
 import Cardano.Address as Address exposing (Credential(..), CredentialHash, NetworkId(..))
@@ -264,7 +264,13 @@ disburse networkId rootUtxoRef scope requiredSigners validityRange ( spentUtxoRe
         Ok <| ( txIntents, TxIntent.TxReferenceInput rootUtxoRef :: otherIntents )
 
     else
-        Err <| "Trying to disburse more than is available in this UTxO. Overflow value is: " ++ Debug.toString overflowValue
+        Err <|
+            "Trying to disburse more than is available in this UTxO. Overflow value is: "
+                ++ String.join "\n" (Value.toMultilineString overflowValue)
+                ++ "\n\nSpent output value: "
+                ++ String.join "\n" (Value.toMultilineString spentOutput.amount)
+                ++ "\n\nDisburse value: "
+                ++ String.join "\n" (Value.toMultilineString value)
 
 
 
