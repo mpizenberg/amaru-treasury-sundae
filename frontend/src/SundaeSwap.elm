@@ -64,6 +64,3 @@ orderToData order =
                     , Data.Int <| I.fromNatural buying.amount
                     ]
                 ]
-
-        _ ->
-            Debug.todo ""
