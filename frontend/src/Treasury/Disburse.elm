@@ -256,6 +256,7 @@ disburse networkId rootUtxoRef scope requiredSigners validityRange ( spentUtxoRe
 
         overflowValue =
             Value.subtract value spentOutput.amount
+                |> Value.normalize
 
         ( txIntents, otherIntents ) =
             Treasury.Sundae.disburse spendConfig receivers value
