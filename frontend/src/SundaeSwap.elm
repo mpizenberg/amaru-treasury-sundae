@@ -1,4 +1,4 @@
-module SundaeSwap exposing (..)
+module SundaeSwap exposing (Order(..), OrderDatum, SingletonValue, orderDatumToData)
 
 import Bytes.Comparable as Bytes exposing (Bytes)
 import Cardano.Address as Address exposing (Address, CredentialHash)
@@ -21,12 +21,7 @@ type alias OrderDatum =
 
 
 type Order
-    = Strategy Todo
-    | Swap { selling : SingletonValue, buying : SingletonValue }
-    | Deposit Todo
-    | Withdrawal Todo
-    | Donation Todo
-    | Record Todo
+    = Swap { selling : SingletonValue, buying : SingletonValue }
 
 
 type alias SingletonValue =
@@ -34,10 +29,6 @@ type alias SingletonValue =
     , assetName : Bytes AssetName
     , amount : Natural
     }
-
-
-type Todo
-    = Todo
 
 
 {-| Create the Data for an order datum.
