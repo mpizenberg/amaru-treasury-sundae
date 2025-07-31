@@ -80,8 +80,10 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
                 Nothing ->
                     Witness.ByValue <| Script.cborWrappedBytes permissionsScript
 
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
+                Just _ ->
+                    -- Witness.ByReference ref
+                    -- TODO: figure out why Koios is misbehaving and giving incorrect utxos
+                    Witness.ByValue <| Script.cborWrappedBytes permissionsScript
 
         requiredWithdrawals =
             -- Withdrawal with the scope owner script
@@ -114,8 +116,10 @@ mergeUtxos networkId rootUtxo scope requiredSigners validityRange =
                 Nothing ->
                     Witness.ByValue <| Script.cborWrappedBytes treasuryScript
 
-                Just ( ref, _ ) ->
-                    Witness.ByReference ref
+                Just _ ->
+                    -- Witness.ByReference ref
+                    -- TODO: figure out why Koios is misbehaving and giving incorrect utxos
+                    Witness.ByValue <| Script.cborWrappedBytes treasuryScript
 
         -- The address must have a stake cred (delegated to always abstain)
         scopeTreasuryAddress =
